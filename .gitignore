@@ -49,3 +49,4 @@ wasm/electron/dist
 wasm/electron/.stage
 wasm/build/
 /tools/protoc
+/tools/wasm-python

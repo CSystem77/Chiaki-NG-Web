@@ -20,8 +20,8 @@ Sortie : `build-wasm/wasm/` — lancer avec `node wasm/proxy/server.mjs` puis ht
 |---|---|---|
 | Git | oui | `sudo apt install git` |
 | [Emscripten (emsdk)](https://emscripten.org/docs/getting_started/downloads.html) | `emcc` / `emcmake` | idem |
-| CMake + Ninja + Python 3 | oui | `sudo apt install cmake ninja-build python3` |
-| `protoc` | `tools\protoc\bin\protoc.exe` (dépôt) | `sudo apt install protobuf-compiler` |
+| CMake + Ninja + Python 3 | oui (le script crée `tools\wasm-python` avec protobuf 4.25.3 pour nanopb) | `sudo apt install cmake ninja-build python3` |
+| `protoc` | téléchargé par le script dans `tools\protoc\` (pas dans git) | `sudo apt install protobuf-compiler` (ou le script le télécharge) |
 | Node.js ≥ 18 | pour **lancer** le serveur | `sudo apt install nodejs` |
 
 **Emscripten (une fois)**
