@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Res/chiaking-logo-white.svg" alt="chiaki-ng" width="420">
+  <img src="Res/chiaking-logo.svg" alt="chiaki-ng" width="420">
 </p>
 
 # chiaki-ng - Web Edition
@@ -29,7 +29,7 @@ This project is not endorsed or certified by Sony Interactive Entertainment LLC.
 <p align="center"><em>Electron desktop app (Windows / Linux / macOS)</em></p>
 
 <p align="center">
-  <img src="Res/chiaki-ng-web.svg" alt="Chiaki-NG Web Edition" width="360">
+  <img src="Res/chiaki-ng-web_v2.svg" alt="Chiaki-NG Web Edition" width="360">
 </p>
 
 ---
