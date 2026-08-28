@@ -826,6 +826,10 @@ function unlockAuth() {
 	}
 }
 
+function isElectronApp() {
+	return /\bElectron\b/i.test(navigator.userAgent || "");
+}
+
 const SHARE_ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 const share = {
 	isGuest: false,
@@ -952,16 +956,27 @@ function showShareError(key) {
 	el.classList.toggle("hidden", !key);
 }
 
-function openShareModal() {
+let shareModalRestoreFs = false;
+
+async function openShareModal() {
+	if (isElectronApp()) return;
 	closeAccountMenu();
 	showShareError("");
+	shareModalRestoreFs = isFullscreen() && currentView === "stream";
+	if (shareModalRestoreFs) await exitStreamFullscreen();
 	applyShareForm(share);
 	updateShareBanners();
 	$("share-modal")?.classList.remove("hidden");
 }
 
-function closeShareModal() {
+async function closeShareModal() {
 	$("share-modal")?.classList.add("hidden");
+	if (shareModalRestoreFs && streaming && currentView === "stream") {
+		shareModalRestoreFs = false;
+		await enterStreamFullscreen();
+	} else {
+		shareModalRestoreFs = false;
+	}
 }
 
 function bindShareBannerDrag(el) {
@@ -1005,7 +1020,7 @@ function applyShareData(data) {
 }
 
 async function loadShareState() {
-	if (share.isGuest) return;
+	if (share.isGuest || isElectronApp()) return;
 	const { ok, body } = await cloudRequest("/api/share");
 	if (!ok) return;
 	applyShareData(body);
@@ -4236,8 +4251,8 @@ function bindUi() {
 		e.stopPropagation();
 		openShareModal();
 	};
-	$("btn-stream-share").onclick = openShareModal;
-	$("share-banner-manage").onclick = openShareModal;
+	$("btn-stream-share").onclick = () => openShareModal();
+	$("share-banner-manage").onclick = () => openShareModal();
 	$("share-banner-ok").onclick = () => {
 		share.bannerDismissed = true;
 		updateShareBanners();
@@ -4799,13 +4814,14 @@ function scheduleWasmWarmup() {
 }
 
 async function boot() {
+	document.documentElement.classList.toggle("electron-app", isElectronApp());
 	syncHandheldChrome();
 	loadSettings();
 	bindUi();
 	await loadI18n(settings.language);
 	applyI18n();
 	const guestToken = shareTokenFromHash();
-	if (guestToken) {
+	if (guestToken && !isElectronApp()) {
 		await bootGuest(guestToken);
 		return;
 	}

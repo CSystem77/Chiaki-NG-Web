@@ -35,27 +35,30 @@ function Ensure-Vendor($rel, $url) {
 }
 
 function Ensure-Protoc {
+	$ver = "3.9.1"
 	$protocDir = Join-Path $Root "tools\protoc\bin"
 	$protocExe = Join-Path $protocDir "protoc.exe"
+	$ok = $false
 	if (Test-Path $protocExe) {
-		$env:PATH = "$protocDir;$env:PATH"
+		$got = & $protocExe --version 2>$null
+		if ("$got" -match "3\.9\.1") { $ok = $true }
 	}
-	if (Get-Command protoc -ErrorAction SilentlyContinue) { return }
-
-	$ver = "3.9.1"
-	$url = "https://github.com/protocolbuffers/protobuf/releases/download/v$ver/protoc-$ver-win64.zip"
-	$dest = Join-Path $Root "tools\protoc"
-	$zip = Join-Path $env:TEMP "protoc-$ver-win64.zip"
-	Write-Host "Telechargement de protoc $ver vers tools\protoc ..."
-	[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-	New-Item -ItemType Directory -Force -Path $dest | Out-Null
-	Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-	Expand-Archive -Path $zip -DestinationPath $dest -Force
-	Remove-Item $zip -ErrorAction SilentlyContinue
-	if (-not (Test-Path $protocExe)) {
-		Write-Error "Echec du telechargement de protoc. Installez Protocol Buffers ou placez protoc.exe dans tools\protoc\bin."
+	if (-not $ok) {
+		$url = "https://github.com/protocolbuffers/protobuf/releases/download/v$ver/protoc-$ver-win64.zip"
+		$dest = Join-Path $Root "tools\protoc"
+		$zip = Join-Path $env:TEMP "protoc-$ver-win64.zip"
+		Write-Host "Telechargement de protoc $ver vers tools\protoc (ignore le protoc systeme) ..."
+		[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+		New-Item -ItemType Directory -Force -Path $dest | Out-Null
+		Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+		Expand-Archive -Path $zip -DestinationPath $dest -Force
+		Remove-Item $zip -ErrorAction SilentlyContinue
+		if (-not (Test-Path $protocExe)) {
+			Write-Error "Echec du telechargement de protoc $ver."
+		}
 	}
-	$env:PATH = "$protocDir;$env:PATH"
+	$env:PATH = "$protocDir;" + (($env:PATH -split ";" | Where-Object { $_ -and ($_ -notmatch "[\\/]protoc[\\/]bin") }) -join ";")
+	return $protocExe
 }
 
 function Ensure-WasmPython {
@@ -82,18 +85,27 @@ function Ensure-WasmPython {
 }
 
 Import-Emsdk
-Ensure-Protoc
+$ProtocExe = Ensure-Protoc
 $WasmPython = Ensure-WasmPython
+
+$nanopbPb2 = Join-Path $Root "third-party\nanopb\generator\proto\nanopb_pb2.py"
+if (Test-Path $nanopbPb2) {
+	$pb2 = Get-Content -LiteralPath $nanopbPb2 -Raw -ErrorAction SilentlyContinue
+	if ($pb2 -match "runtime_version") {
+		Write-Host "Suppression de nanopb_pb2.py incompatible (regeneré par protoc 29) ..."
+		Remove-Item -LiteralPath $nanopbPb2 -Force
+	}
+}
 
 Ensure-Vendor "third-party\nanopb" "https://github.com/nanopb/nanopb.git"
 Ensure-Vendor "third-party\jerasure" "https://github.com/streetpea/jerasure.git"
 Ensure-Vendor "third-party\gf-complete" "https://github.com/streetpea/gf-complete.git"
 
 Write-Host "emcc: $((Get-Command emcc).Source)"
-Write-Host "protoc: $((Get-Command protoc).Source)"
+Write-Host "protoc: $ProtocExe"
 Write-Host "python (nanopb): $WasmPython"
 Write-Host "Configuration Emscripten dans $BuildDir ..."
-emcmake cmake -S $Root -B (Join-Path $Root $BuildDir) -G $Generator -DCHIAKI_ENABLE_WASM=ON -DPYTHON_EXECUTABLE="$WasmPython"
+emcmake cmake -S $Root -B (Join-Path $Root $BuildDir) -G $Generator -DCHIAKI_ENABLE_WASM=ON -DPYTHON_EXECUTABLE="$WasmPython" "-DPROTOC=$ProtocExe"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "Compilation chiaki-wasm ..."

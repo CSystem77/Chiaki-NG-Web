@@ -1337,6 +1337,10 @@ body.share-guest #btn-stream-share,
 body.share-guest #btn-vpad,
 body.share-guest #btn-discover,
 body.share-guest #app-version { display: none !important; }
+html.electron-app #btn-stream-share,
+html.electron-app #btn-share,
+html.electron-app #share-banner,
+html.electron-app #share-modal { display: none !important; }
 .share-stream-state.is-offline { color: #ffb74d; }
 
 .modal {

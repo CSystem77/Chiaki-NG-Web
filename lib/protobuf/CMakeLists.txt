@@ -1,5 +1,7 @@
 
-find_program(PROTOC protoc)
+if(NOT PROTOC OR NOT EXISTS "${PROTOC}")
+	find_program(PROTOC protoc)
+endif()
 if(NOT PROTOC)
 	message(FATAL_ERROR "Could not find protoc")
 endif()
