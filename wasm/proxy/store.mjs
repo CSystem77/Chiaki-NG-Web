@@ -45,6 +45,16 @@ function normHostId(id) {
 	return String(id || "").toUpperCase().replace(/[^0-9A-F]/g, "");
 }
 
+function sanitizeVpadKeys(list) {
+	if (!Array.isArray(list)) return null;
+	const ok = new Set([
+		"l2", "r2", "l1", "r1", "share", "options", "touchpad", "ls",
+		"up", "left", "right", "down", "pyramid", "box", "moon", "cross",
+		"rs", "ps", "l3", "r3"
+	]);
+	return list.map((id) => String(id)).filter((id) => ok.has(id)).slice(0, 24);
+}
+
 function claimKeysOf(h) {
 	const keys = [];
 	const id = normHostId(h && h.id);
@@ -118,6 +128,8 @@ export function openStore(cfg) {
 
 	if (!tableHasColumn(db, "users", "email"))
 		db.exec("ALTER TABLE users ADD COLUMN email TEXT");
+	if (!tableHasColumn(db, "shares", "vpad_keys"))
+		db.exec("ALTER TABLE shares ADD COLUMN vpad_keys TEXT");
 
 	const userCols = "id, username, email, password_hash, created_at";
 	const qUserByName = db.prepare(`SELECT ${userCols} FROM users WHERE username = ?`);
@@ -161,15 +173,15 @@ export function openStore(cfg) {
 	`);
 	const qClaimCount = db.prepare("SELECT COUNT(*) AS n FROM claimed_consoles");
 	const qAllProfiles = db.prepare("SELECT user_id, hosts_json FROM profiles");
-	const shareCols = "user_id, token, video, audio, vpad, gamepad, active, created_at";
+	const shareCols = "user_id, token, video, audio, vpad, gamepad, vpad_keys, active, created_at";
 	const qShareByUser = db.prepare(`SELECT ${shareCols} FROM shares WHERE user_id = ?`);
 	const qShareByToken = db.prepare(`SELECT ${shareCols} FROM shares WHERE token = ?`);
 	const qInsertShare = db.prepare(`
-		INSERT INTO shares (user_id, token, video, audio, vpad, gamepad, active, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO shares (user_id, token, video, audio, vpad, gamepad, vpad_keys, active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`);
 	const qUpdateShare = db.prepare(`
-		UPDATE shares SET token = ?, video = ?, audio = ?, vpad = ?, gamepad = ?, active = ? WHERE user_id = ?
+		UPDATE shares SET token = ?, video = ?, audio = ?, vpad = ?, gamepad = ?, vpad_keys = ?, active = ? WHERE user_id = ?
 	`);
 	const qDeleteShare = db.prepare("DELETE FROM shares WHERE user_id = ?");
 
@@ -288,6 +300,7 @@ export function openStore(cfg) {
 			audio: !!row.audio,
 			vpad: !!row.vpad,
 			gamepad: !!row.gamepad,
+			vpadKeys: sanitizeVpadKeys(parseJson(row.vpad_keys, null)),
 			active: !!row.active
 		};
 	}
@@ -298,6 +311,7 @@ export function openStore(cfg) {
 			audio: body.audio !== false,
 			vpad: !!body.vpad,
 			gamepad: !!body.gamepad,
+			vpadKeys: sanitizeVpadKeys(body.vpadKeys),
 			active: !!body.active
 		};
 	}
@@ -437,10 +451,11 @@ export function openStore(cfg) {
 			const rights = rightsFrom(body || {});
 			const row = qShareByUser.get(userId);
 			const token = row && !regenerate ? row.token : crypto.randomBytes(16).toString("hex");
+			const keysJson = rights.vpadKeys ? JSON.stringify(rights.vpadKeys) : null;
 			if (!row)
-				qInsertShare.run(userId, token, rights.video ? 1 : 0, rights.audio ? 1 : 0, rights.vpad ? 1 : 0, rights.gamepad ? 1 : 0, rights.active ? 1 : 0, now());
+				qInsertShare.run(userId, token, rights.video ? 1 : 0, rights.audio ? 1 : 0, rights.vpad ? 1 : 0, rights.gamepad ? 1 : 0, keysJson, rights.active ? 1 : 0, now());
 			else
-				qUpdateShare.run(token, rights.video ? 1 : 0, rights.audio ? 1 : 0, rights.vpad ? 1 : 0, rights.gamepad ? 1 : 0, rights.active ? 1 : 0, userId);
+				qUpdateShare.run(token, rights.video ? 1 : 0, rights.audio ? 1 : 0, rights.vpad ? 1 : 0, rights.gamepad ? 1 : 0, keysJson, rights.active ? 1 : 0, userId);
 			return publicShare(qShareByUser.get(userId));
 		},
 		deleteShare(userId) {

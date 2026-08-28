@@ -852,20 +852,19 @@ const share = {
 	pcs: new Map(),
 	iceWait: new Map(),
 	guestPads: new Map(),
+	vpadTheme: "",
+	vpadCustom: {},
+	vpadLayout: {},
+	vpadOpacity: 55,
+	vpadKeys: null,
 	media: null,
 	audioDest: null,
 	bannerDismissed: false,
 	capCanvas: null,
 	capCtx: null,
-	lastFrame: null,
 	keepAlive: false,
 	keyTimer: null,
-	videoGen: null,
-	videoWriter: null,
-	videoWriteBusy: false,
-	shareCopyBusy: false,
-	lastBmp: null,
-	lastVideoTs: 0
+	lastShareDraw: 0
 };
 
 function shareTokenFromHash() {
@@ -893,7 +892,8 @@ function shareRightsFromForm() {
 	return {
 		video: $("share-opt-video")?.checked !== false,
 		audio: $("share-opt-audio")?.checked !== false,
-		vpad: !!settings.vpadEnabled,
+		vpad: !!$("share-opt-vpad")?.checked,
+		vpadKeys: shareVpadKeysFromForm(),
 		gamepad: !!$("share-opt-gamepad")?.checked
 	};
 }
@@ -901,7 +901,111 @@ function shareRightsFromForm() {
 function applyShareForm(data) {
 	if ($("share-opt-video")) $("share-opt-video").checked = data.video !== false;
 	if ($("share-opt-audio")) $("share-opt-audio").checked = data.audio !== false;
+	if ($("share-opt-vpad")) $("share-opt-vpad").checked = data.vpad !== false;
 	if ($("share-opt-gamepad")) $("share-opt-gamepad").checked = !!data.gamepad;
+	applyShareVpadKeysForm(data.vpadKeys);
+	syncShareVpadKeysPanel();
+}
+
+function allVpadKeyIds() {
+	return VPAD_ITEMS.map((item) => item.id);
+}
+
+function normalizeVpadKeys(list) {
+	if (!Array.isArray(list)) return null;
+	const valid = new Set(allVpadKeyIds());
+	return list.map((id) => String(id)).filter((id) => valid.has(id));
+}
+
+function vpadKeyAllowed(id) {
+	if (!share.isGuest) return true;
+	if (!Array.isArray(share.vpadKeys)) return true;
+	return share.vpadKeys.includes(id);
+}
+
+function shareVpadKeysFromForm() {
+	const boxes = document.querySelectorAll("#share-vpad-keys-list input[data-vpad-key]");
+	if (!boxes.length) return allVpadKeyIds();
+	return [...boxes].filter((el) => el.checked).map((el) => el.dataset.vpadKey);
+}
+
+function applyShareVpadKeysForm(list) {
+	const allow = Array.isArray(list) ? new Set(list) : null;
+	document.querySelectorAll("#share-vpad-keys-list input[data-vpad-key]").forEach((el) => {
+		el.checked = allow ? allow.has(el.dataset.vpadKey) : true;
+	});
+	syncShareVpadGroupChecks();
+}
+
+function syncShareVpadKeysPanel() {
+	$("share-vpad-keys")?.classList.toggle("hidden", !$("share-opt-vpad")?.checked);
+}
+
+function syncShareVpadGroupChecks() {
+	document.querySelectorAll(".share-vpad-key-group").forEach((group) => {
+		const boxes = [...group.querySelectorAll("input[data-vpad-key]")];
+		const master = group.querySelector("input[data-vpad-group]");
+		if (!master || !boxes.length) return;
+		const n = boxes.filter((el) => el.checked).length;
+		master.checked = n === boxes.length;
+		master.indeterminate = n > 0 && n < boxes.length;
+	});
+}
+
+function setShareVpadKeysChecked(on) {
+	document.querySelectorAll("#share-vpad-keys-list input[data-vpad-key]").forEach((el) => {
+		el.checked = !!on;
+	});
+	syncShareVpadGroupChecks();
+}
+
+function fillShareVpadKeyPicker() {
+	const root = $("share-vpad-keys-list");
+	if (!root || root.dataset.ready) return;
+	root.innerHTML = VPAD_SHARE_GROUPS.map((group) => {
+		const keys = group.keys.map((id) => VPAD_ITEMS.find((item) => item.id === id)).filter(Boolean);
+		const chips = keys.map((item) => (
+			`<label class="share-vpad-key">` +
+			`<input type="checkbox" data-vpad-key="${item.id}" checked>` +
+			`<span>${item.label}</span></label>`
+		)).join("");
+		return `<div class="share-vpad-key-group" data-group="${group.id}">` +
+			`<h4><label class="check-label"><input type="checkbox" data-vpad-group="${group.id}" checked> ` +
+			`<span data-i18n="keys.group.${group.id}">${group.id}</span></label></h4>` +
+			`<div class="share-vpad-key-chips">${chips}</div></div>`;
+	}).join("");
+	root.dataset.ready = "1";
+	root.addEventListener("change", (ev) => {
+		if (ev.target.matches("input[data-vpad-group]")) {
+			const on = ev.target.checked;
+			ev.target.closest(".share-vpad-key-group")
+				?.querySelectorAll("input[data-vpad-key]")
+				.forEach((el) => { el.checked = on; });
+		}
+		syncShareVpadGroupChecks();
+		if (share.active) saveShare();
+	});
+}
+
+function filterPadByVpadKeys(pad, keys) {
+	if (!Array.isArray(keys)) return pad;
+	const allow = new Set(keys);
+	let buttons = 0, l2 = 0, r2 = 0, lx = 0, ly = 0, rx = 0, ry = 0;
+	for (const item of VPAD_ITEMS) {
+		if (!allow.has(item.id)) continue;
+		if (item.kind === "button" && item.bit && (pad.buttons & BTN[item.bit]))
+			buttons |= BTN[item.bit];
+		else if (item.kind === "trigger" && item.axis === "l2") l2 = Number(pad.l2) || 0;
+		else if (item.kind === "trigger" && item.axis === "r2") r2 = Number(pad.r2) || 0;
+		else if (item.kind === "stick" && item.id === "ls") {
+			lx = Number(pad.lx) || 0;
+			ly = Number(pad.ly) || 0;
+		} else if (item.kind === "stick" && item.id === "rs") {
+			rx = Number(pad.rx) || 0;
+			ry = Number(pad.ry) || 0;
+		}
+	}
+	return { ...pad, buttons, l2, r2, lx, ly, rx, ry };
 }
 
 function updateShareBanners() {
@@ -920,19 +1024,50 @@ function updateShareBanners() {
 	document.body.classList.toggle("share-guest", share.isGuest);
 }
 
+function shareVpadSkinPayload() {
+	const custom = {};
+	const src = settings.vpadCustom && typeof settings.vpadCustom === "object" ? settings.vpadCustom : {};
+	for (const [id, url] of Object.entries(src)) {
+		if (typeof url === "string" && url.startsWith("data:image/")) custom[id] = url;
+	}
+	const layout = settings.vpadLayout && typeof settings.vpadLayout === "object" ? settings.vpadLayout : {};
+	return {
+		vpadTheme: vpadThemeId(),
+		vpadCustom: custom,
+		vpadLayout: layout,
+		vpadOpacity: vpadOpacityPct(),
+		vpadKeys: Array.isArray(share.vpadKeys) ? share.vpadKeys : shareVpadKeysFromForm()
+	};
+}
+
 function shareBroadcastState(to) {
 	if (!share.active || share.isGuest) return;
-	share.vpad = !!settings.vpadEnabled;
 	const msg = {
 		type: "status",
 		streaming: !!streaming,
-		vpad: !!settings.vpadEnabled,
+		vpad: !!share.vpad,
 		video: share.video !== false,
 		audio: share.audio !== false,
-		gamepad: !!share.gamepad
+		gamepad: !!share.gamepad,
+		...shareVpadSkinPayload()
 	};
 	if (to) msg.to = to;
 	shareSend(msg);
+}
+
+let shareSkinTimer = 0;
+function shareBroadcastVpadSkin(delayMs) {
+	if (!share.active || share.isGuest) return;
+	if (shareSkinTimer) clearTimeout(shareSkinTimer);
+	if (delayMs) {
+		shareSkinTimer = setTimeout(() => {
+			shareSkinTimer = 0;
+			shareBroadcastState();
+		}, delayMs);
+		return;
+	}
+	shareSkinTimer = 0;
+	shareBroadcastState();
 }
 
 function refreshGuestOverlay() {
@@ -947,12 +1082,15 @@ function applyGuestShareStatus(msg) {
 	if (msg.video != null) share.video = msg.video !== false;
 	if (msg.audio != null) share.audio = msg.audio !== false;
 	if (msg.gamepad != null) share.gamepad = !!msg.gamepad;
-	if (msg.vpad != null) {
-		share.vpad = !!msg.vpad;
-		settings.vpadEnabled = share.vpad;
-		syncVpadUi();
-	}
+	if (msg.vpad != null) share.vpad = !!msg.vpad;
+	if (typeof msg.vpadTheme === "string") share.vpadTheme = msg.vpadTheme;
+	if (msg.vpadCustom && typeof msg.vpadCustom === "object") share.vpadCustom = msg.vpadCustom;
+	if (msg.vpadLayout && typeof msg.vpadLayout === "object") share.vpadLayout = msg.vpadLayout;
+	if (msg.vpadOpacity != null) share.vpadOpacity = Number(msg.vpadOpacity);
+	if (msg.vpadKeys !== undefined) share.vpadKeys = normalizeVpadKeys(msg.vpadKeys);
+	if (!share.vpad) vpad = { buttons: 0, l2: 0, r2: 0, lx: 0, ly: 0, rx: 0, ry: 0 };
 	if (share.video === false) $("share-player")?.classList.add("hidden");
+	syncVpadUi();
 	refreshGuestOverlay();
 }
 
@@ -1019,8 +1157,9 @@ function applyShareData(data) {
 	if (share.active && !wasActive) share.bannerDismissed = false;
 	share.video = data.video !== false;
 	share.audio = data.audio !== false;
-	share.vpad = !!settings.vpadEnabled;
+	share.vpad = data.vpad !== false;
 	share.gamepad = !!data.gamepad;
+	share.vpadKeys = normalizeVpadKeys(data.vpadKeys);
 	if (data.viewers != null) share.viewers = Number(data.viewers) || 0;
 	applyShareForm(share);
 	updateShareBanners();
@@ -1079,12 +1218,44 @@ function shareForceKeyframes() {
 	}
 }
 
+function shareCaptureFps() {
+	const fps = Number(settings.fps) || 60;
+	return fps <= 30 ? 30 : 60;
+}
+
+function shareEvenDim(n) {
+	n = Math.max(2, Math.round(Number(n) || 0));
+	return n + (n & 1);
+}
+
+function shareBitrateBps() {
+	const kbps = effectiveBitrate();
+	return Math.min(20_000_000, Math.max(6_000_000, kbps * 1000));
+}
+
+function preferShareVideoCodecs(pc) {
+	if (!pc || typeof RTCRtpSender?.getCapabilities !== "function") return;
+	const caps = RTCRtpSender.getCapabilities("video");
+	if (!caps?.codecs?.length) return;
+	const rank = (mime) => {
+		const m = String(mime || "").toLowerCase();
+		if (m === "video/h264") return 0;
+		if (m === "video/vp9") return 1;
+		if (m === "video/av1") return 2;
+		if (m === "video/vp8") return 3;
+		return 9;
+	};
+	const sorted = caps.codecs.slice().sort((a, b) => rank(a.mimeType) - rank(b.mimeType));
+	for (const t of pc.getTransceivers())
+		try { t.setCodecPreferences(sorted); } catch {}
+}
+
 function startShareKeyframeLoop() {
 	if (share.keyTimer) return;
 	share.keyTimer = setInterval(() => {
 		if (!share.active || share.isGuest) return;
 		shareForceKeyframes();
-	}, 500);
+	}, 2500);
 }
 
 function startShareCaptureLoop() {
@@ -1093,34 +1264,41 @@ function startShareCaptureLoop() {
 	const tick = () => {
 		if (share.keepAlive) requestAnimationFrame(tick);
 		if (!share.capCtx || !share.capCanvas) return;
-		try {
-			if (share.lastBmp)
-				share.capCtx.drawImage(share.lastBmp, 0, 0, share.capCanvas.width, share.capCanvas.height);
-			else
-				share.capCtx.clearRect(0, 0, 1, 1);
-			const track = share.media?.getVideoTracks()[0];
-			if (track && typeof track.requestFrame === "function") track.requestFrame();
-		} catch {}
+		const track = share.media?.getVideoTracks()[0];
+		if (track && typeof track.requestFrame === "function" && performance.now() - share.lastShareDraw < 250)
+			try { track.requestFrame(); } catch {}
 	};
 	requestAnimationFrame(tick);
 }
 
+function syncShareCanvasSize(w, h) {
+	const c = share.capCanvas;
+	if (!c) return false;
+	w = shareEvenDim(w);
+	h = shareEvenDim(h);
+	if (c.width === w && c.height === h) return false;
+	c.width = w;
+	c.height = h;
+	c.style.width = w + "px";
+	c.style.height = h + "px";
+	return true;
+}
+
 function pushShareFrame(frame) {
-	if (!share.active || share.isGuest || !share.pcs.size || share.shareCopyBusy) return;
-	share.shareCopyBusy = true;
-	let clone = null;
-	try { clone = frame.clone(); }
-	catch {
-		share.shareCopyBusy = false;
-		return;
+	if (!share.active || share.isGuest || !share.pcs.size || !share.capCtx || !frame) return;
+	const d = videoFrameDest(frame);
+	if (!d.sw || !d.sh) return;
+	const resized = syncShareCanvasSize(d.sw, d.sh);
+	try {
+		share.capCtx.imageSmoothingEnabled = false;
+		share.capCtx.drawImage(frame, d.sx, d.sy, d.sw, d.sh, 0, 0, share.capCanvas.width, share.capCanvas.height);
+		share.lastShareDraw = performance.now();
+		const track = share.media?.getVideoTracks()[0];
+		if (track && typeof track.requestFrame === "function") track.requestFrame();
+	} catch {}
+	if (resized) {
+		for (const pc of share.pcs.values()) configureShareSender(pc);
 	}
-	createImageBitmap(clone).then((bmp) => {
-		try { clone.close(); } catch {}
-		if (share.lastBmp) try { share.lastBmp.close(); } catch {}
-		share.lastBmp = bmp;
-	}).catch(() => {
-		try { clone.close(); } catch {}
-	}).finally(() => { share.shareCopyBusy = false; });
 }
 
 function stopShareMedia() {
@@ -1129,22 +1307,7 @@ function stopShareMedia() {
 		clearInterval(share.keyTimer);
 		share.keyTimer = null;
 	}
-	if (share.lastFrame) {
-		try { share.lastFrame.close(); } catch {}
-		share.lastFrame = null;
-	}
-	if (share.lastBmp) {
-		try { share.lastBmp.close(); } catch {}
-		share.lastBmp = null;
-	}
-	if (share.videoWriter) {
-		try { share.videoWriter.releaseLock(); } catch {}
-		share.videoWriter = null;
-	}
-	share.videoGen = null;
-	share.videoWriteBusy = false;
-	share.shareCopyBusy = false;
-	share.lastVideoTs = 0;
+	share.lastShareDraw = 0;
 	if (share.media) {
 		for (const t of share.media.getTracks()) {
 			try { t.stop(); } catch {}
@@ -1173,14 +1336,19 @@ function attachShareAudio() {
 function ensureShareMedia() {
 	if (!share.media && typeof HTMLCanvasElement !== "undefined" && HTMLCanvasElement.prototype.captureStream) {
 		const c = document.createElement("canvas");
-		c.width = canvas.width || 1280;
-		c.height = canvas.height || 720;
+		const [pw, ph] = streamPresetSize();
+		const w = shareEvenDim(canvas.width || pw || 1920);
+		const h = shareEvenDim(canvas.height || ph || 1080);
+		c.width = w;
+		c.height = h;
 		c.className = "share-cap";
 		c.setAttribute("aria-hidden", "true");
+		c.style.cssText = `position:fixed;left:-10000px;top:0;width:${w}px;height:${h}px;opacity:0;pointer-events:none;`;
 		document.body.appendChild(c);
 		share.capCanvas = c;
-		share.capCtx = c.getContext("2d", { alpha: false, desynchronized: true });
-		share.media = c.captureStream(30);
+		share.capCtx = c.getContext("2d", { alpha: false });
+		if (share.capCtx) share.capCtx.imageSmoothingEnabled = false;
+		share.media = c.captureStream(shareCaptureFps());
 		const vt = share.media.getVideoTracks()[0];
 		if (vt) {
 			try { vt.contentHint = "motion"; } catch {}
@@ -1194,14 +1362,19 @@ function ensureShareMedia() {
 }
 
 async function configureShareSender(pc) {
+	preferShareVideoCodecs(pc);
 	for (const sender of pc.getSenders()) {
 		if (sender.track?.kind !== "video") continue;
+		try { sender.track.contentHint = "motion"; } catch {}
 		try {
 			const params = sender.getParameters();
 			if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-			params.degradationPreference = "maintain-framerate";
-			params.encodings[0].maxFramerate = 30;
-			params.encodings[0].maxBitrate = 8_000_000;
+			params.degradationPreference = "maintain-resolution";
+			params.encodings[0].maxFramerate = shareCaptureFps();
+			params.encodings[0].maxBitrate = shareBitrateBps();
+			params.encodings[0].scaleResolutionDownBy = 1;
+			params.encodings[0].priority = "high";
+			params.encodings[0].networkPriority = "high";
 			await sender.setParameters(params);
 		} catch {}
 		try { sender.generateKeyFrame?.(); } catch {}
@@ -1222,6 +1395,7 @@ async function shareSyncPeerTracks() {
 				} else pc.addTrack(track, stream);
 			} catch {}
 		}
+		preferShareVideoCodecs(pc);
 		try {
 			const offer = await pc.createOffer();
 			await pc.setLocalDescription(offer);
@@ -1248,11 +1422,15 @@ async function shareStartPeer(guestId) {
 			pc.addTrack(track, stream);
 		}
 	}
+	preferShareVideoCodecs(pc);
 	pc.onicecandidate = (ev) => {
 		if (ev.candidate) shareSend({ type: "ice", to: guestId, candidate: icePayload(ev.candidate) });
 	};
 	pc.onconnectionstatechange = () => {
-		if (pc.connectionState === "connected") shareForceKeyframes();
+		if (pc.connectionState === "connected") {
+			configureShareSender(pc);
+			shareForceKeyframes();
+		}
 	};
 	try {
 		const offer = await pc.createOffer();
@@ -1342,16 +1520,17 @@ function shareOnStreaming(on) {
 }
 
 function mergeGuestPad(buttons, l2, r2, lx, ly, rx, ry) {
-	if (!share.active || share.isGuest || (!settings.vpadEnabled && !share.gamepad))
+	if (!share.active || share.isGuest || (!share.vpad && !share.gamepad))
 		return { buttons, l2, r2, lx, ly, rx, ry };
 	for (const p of share.guestPads.values()) {
-		buttons |= Number(p.buttons) || 0;
-		l2 = Math.max(l2, Number(p.l2) || 0);
-		r2 = Math.max(r2, Number(p.r2) || 0);
-		if (p.lx) lx = Number(p.lx);
-		if (p.ly) ly = Number(p.ly);
-		if (p.rx) rx = Number(p.rx);
-		if (p.ry) ry = Number(p.ry);
+		const src = share.gamepad ? p : filterPadByVpadKeys(p, share.vpadKeys);
+		buttons |= Number(src.buttons) || 0;
+		l2 = Math.max(l2, Number(src.l2) || 0);
+		r2 = Math.max(r2, Number(src.r2) || 0);
+		if (src.lx) lx = Number(src.lx);
+		if (src.ly) ly = Number(src.ly);
+		if (src.rx) rx = Number(src.rx);
+		if (src.ry) ry = Number(src.ry);
 	}
 	return { buttons, l2, r2, lx, ly, rx, ry };
 }
@@ -1387,11 +1566,20 @@ function guestPadSnapshot() {
 		}
 	}
 	if (share.vpad && vpadOn) {
-		buttons |= vpad.buttons;
-		l2 = Math.max(l2, vpad.l2);
-		r2 = Math.max(r2, vpad.r2);
-		if (vpadStickActive("ls")) { lx = vpad.lx; ly = vpad.ly; }
-		if (vpadStickActive("rs")) { rx = vpad.rx; ry = vpad.ry; }
+		const pad = filterPadByVpadKeys({
+			buttons: vpad.buttons,
+			l2: vpad.l2,
+			r2: vpad.r2,
+			lx: vpadStickActive("ls") ? vpad.lx : 0,
+			ly: vpadStickActive("ls") ? vpad.ly : 0,
+			rx: vpadStickActive("rs") ? vpad.rx : 0,
+			ry: vpadStickActive("rs") ? vpad.ry : 0
+		}, share.vpadKeys);
+		buttons |= pad.buttons;
+		l2 = Math.max(l2, pad.l2);
+		r2 = Math.max(r2, pad.r2);
+		if (pad.lx || pad.ly) { lx = pad.lx; ly = pad.ly; }
+		if (pad.rx || pad.ry) { rx = pad.rx; ry = pad.ry; }
 	}
 	return { type: "pad", buttons, l2, r2, lx, ly, rx, ry };
 }
@@ -1409,17 +1597,18 @@ async function bootGuest(token) {
 	}
 	share.video = body.video !== false;
 	share.audio = body.audio !== false;
-	share.vpad = false;
+	share.vpad = !!body.vpad;
 	share.gamepad = !!body.gamepad;
+	share.vpadKeys = normalizeVpadKeys(body.vpadKeys);
 	share.viewers = Number(body.viewers) || 0;
 	share.hostStreaming = false;
 	$("share-player")?.classList.toggle("hidden", !share.video);
 	await showView("stream");
-	settings.vpadEnabled = false;
 	syncVpadUi();
 	setStreamOverlay(t("share.offline"));
 	setBootScreen(false);
 	const pc = new RTCPeerConnection(SHARE_ICE);
+	preferShareVideoCodecs(pc);
 	const iceQueue = [];
 	let remoteReady = false;
 	const v = $("share-player");
@@ -1466,6 +1655,7 @@ async function bootGuest(token) {
 		if (msg.type === "offer" && msg.sdp) {
 			try {
 				await pc.setRemoteDescription(msg.sdp);
+				preferShareVideoCodecs(pc);
 				remoteReady = true;
 				while (iceQueue.length) {
 					try { await pc.addIceCandidate(new RTCIceCandidate(iceQueue.shift())); } catch {}
@@ -1482,38 +1672,53 @@ async function bootGuest(token) {
 		if (msg.type === "host-left") {
 			share.hostStreaming = false;
 			share.vpad = false;
-			settings.vpadEnabled = false;
 			syncVpadUi();
 			refreshGuestOverlay();
 		}
 		if (msg.type === "status" || msg.type === "rights")
 			applyGuestShareStatus(msg);
-		if (msg.type === "hello" && msg.rights) {
-			share.video = msg.rights.video !== false;
-			share.audio = msg.rights.audio !== false;
-			share.gamepad = !!msg.rights.gamepad;
-			$("share-player")?.classList.toggle("hidden", !share.video);
-		}
+		if (msg.type === "hello" && msg.rights)
+			applyGuestShareStatus(msg.rights);
 	};
 	setInterval(() => {
 		if (!share.isGuest || (!share.vpad && !share.gamepad)) return;
 		shareSend(guestPadSnapshot());
 	}, 16);
-	let lastMediaTime = -1;
+	let lastFrameCount = -1;
 	let stuckHits = 0;
+	let rvfcOn = false;
+	let lastRvfc = 0;
+	const watchFrames = () => {
+		if (!v || typeof v.requestVideoFrameCallback !== "function") return;
+		rvfcOn = true;
+		const cb = () => {
+			lastRvfc = performance.now();
+			if (share.isGuest) v.requestVideoFrameCallback(cb);
+		};
+		v.requestVideoFrameCallback(cb);
+	};
+	watchFrames();
 	setInterval(() => {
 		if (!share.isGuest || !share.hostStreaming || !v?.srcObject) {
-			lastMediaTime = -1;
+			lastFrameCount = -1;
 			stuckHits = 0;
 			return;
 		}
 		playShareVideo();
-		const t = v.currentTime;
-		if (t === lastMediaTime) {
-			stuckHits++;
-			if (stuckHits >= 2) shareSend({ type: "pli" });
-		} else stuckHits = 0;
-		lastMediaTime = t;
+		let progressing = false;
+		if (rvfcOn)
+			progressing = performance.now() - lastRvfc < 1500;
+		else {
+			const q = v.getVideoPlaybackQuality?.();
+			const count = q ? q.totalVideoFrames : (v.webkitDecodedFrameCount || 0);
+			progressing = count !== lastFrameCount && count > 0;
+			lastFrameCount = count;
+		}
+		if (progressing) stuckHits = 0;
+		else if (++stuckHits >= 5) {
+			stuckHits = 0;
+			shareSend({ type: "pli" });
+		}
 	}, 400);
 }
 
@@ -2533,6 +2738,15 @@ const VPAD_ITEMS = [
 	{ id: "r3", kind: "button", bit: "R3", label: "R3" }
 ];
 
+const VPAD_SHARE_GROUPS = [
+	{ id: "face", keys: ["cross", "moon", "box", "pyramid"] },
+	{ id: "dpad", keys: ["up", "down", "left", "right"] },
+	{ id: "shoulders", keys: ["l1", "r1", "l2", "r2"] },
+	{ id: "lstick", keys: ["ls", "l3"] },
+	{ id: "rstick", keys: ["rs", "r3"] },
+	{ id: "system", keys: ["options", "share", "touchpad", "ps"] }
+];
+
 const VPAD_DEFAULTS = {
 	l2: { x: 10, y: 9 }, r2: { x: 90, y: 9 },
 	l1: { x: 10, y: 20 }, r1: { x: 90, y: 20 },
@@ -2561,10 +2775,22 @@ function vpadThemeId() {
 	return VPAD_THEMES.some((t) => t.id === id) ? id : "classic";
 }
 
+function activeVpadThemeId() {
+	if (share.isGuest) {
+		const id = String(share.vpadTheme || "classic");
+		return VPAD_THEMES.some((t) => t.id === id) ? id : "classic";
+	}
+	return vpadThemeId();
+}
+
+function vpadCustomMap() {
+	if (share.isGuest)
+		return share.vpadCustom && typeof share.vpadCustom === "object" ? share.vpadCustom : {};
+	return settings.vpadCustom && typeof settings.vpadCustom === "object" ? settings.vpadCustom : {};
+}
+
 function vpadCustomOf(id) {
-	const map = settings.vpadCustom;
-	if (!map || typeof map !== "object") return "";
-	const url = map[id];
+	const url = vpadCustomMap()[id];
 	return typeof url === "string" && url.startsWith("data:image/") ? url : "";
 }
 
@@ -2573,7 +2799,7 @@ function vpadSvg(inner, color) {
 }
 
 function vpadThemeGlyph(item) {
-	const theme = vpadThemeId();
+	const theme = activeVpadThemeId();
 	const id = item.id;
 	if (theme === "xbox") {
 		if (id === "cross") return `<span class="vpad-letter" style="color:#3ddc84">A</span>`;
@@ -2630,6 +2856,7 @@ function setVpadTheme(id) {
 	syncVpadThemeChips();
 	renderVpad($("vpad"), false);
 	renderVpad($("vpad-editor-stage"), true);
+	shareBroadcastVpadSkin();
 }
 
 function syncVpadCustomPanel() {
@@ -2673,6 +2900,7 @@ async function setVpadCustomImage(file) {
 		renderVpad($("vpad"), false);
 		renderVpad($("vpad-editor-stage"), true);
 		syncVpadCustomPanel();
+		shareBroadcastVpadSkin();
 	} finally {
 		URL.revokeObjectURL(url);
 	}
@@ -2688,6 +2916,7 @@ function clearVpadCustomImage() {
 	renderVpad($("vpad"), false);
 	renderVpad($("vpad-editor-stage"), true);
 	syncVpadCustomPanel();
+	shareBroadcastVpadSkin();
 }
 
 function vpadOpacityPct() {
@@ -2695,9 +2924,15 @@ function vpadOpacityPct() {
 	return clamp(Number.isFinite(raw) ? raw : 55, 1, 100);
 }
 
+function activeVpadOpacityPct() {
+	if (share.isGuest && Number.isFinite(Number(share.vpadOpacity)))
+		return clamp(Number(share.vpadOpacity), 1, 100);
+	return vpadOpacityPct();
+}
+
 function applyVpadOpacity() {
-	const pct = vpadOpacityPct();
-	settings.vpadOpacity = pct;
+	const pct = activeVpadOpacityPct();
+	if (!share.isGuest) settings.vpadOpacity = pct;
 	const alpha = String(pct / 100);
 	document.documentElement.style.setProperty("--vpad-alpha", alpha);
 	["vpad", "vpad-editor-stage"].forEach((id) => {
@@ -2717,9 +2952,15 @@ function vpadBaseSize(item) {
 	return { w: 52, h: 52, font: 13, knob: 0 };
 }
 
+function vpadLayoutMap() {
+	if (share.isGuest)
+		return share.vpadLayout && typeof share.vpadLayout === "object" ? share.vpadLayout : {};
+	return settings.vpadLayout && typeof settings.vpadLayout === "object" ? settings.vpadLayout : {};
+}
+
 function vpadLayoutOf(id) {
 	const fallback = VPAD_DEFAULTS[id] || { x: 50, y: 50 };
-	const cur = (settings.vpadLayout || {})[id] || {};
+	const cur = vpadLayoutMap()[id] || {};
 	return {
 		x: Number.isFinite(cur.x) ? cur.x : fallback.x,
 		y: Number.isFinite(cur.y) ? cur.y : fallback.y,
@@ -2728,17 +2969,21 @@ function vpadLayoutOf(id) {
 }
 
 function patchVpadLayout(id, patch) {
+	if (share.isGuest) return vpadLayoutOf(id);
 	const next = { ...vpadLayoutOf(id), ...patch };
 	settings.vpadLayout = { ...(settings.vpadLayout || {}), [id]: next };
 	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+	shareBroadcastVpadSkin(250);
 	return next;
 }
 
 function resetVpadLayout() {
+	if (share.isGuest) return;
 	settings.vpadLayout = {};
 	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 	renderVpad($("vpad"), false);
 	renderVpad($("vpad-editor-stage"), true);
+	shareBroadcastVpadSkin();
 }
 
 function applyVpadStyle(el, item) {
@@ -2761,9 +3006,10 @@ function renderVpad(root, edit) {
 	root.innerHTML = "";
 	if (edit) root.classList.add("vpad-edit");
 	else root.classList.remove("vpad-edit");
-	root.dataset.theme = vpadThemeId();
-	root.style.setProperty("--vpad-alpha", String(vpadOpacityPct() / 100));
+	root.dataset.theme = activeVpadThemeId();
+	root.style.setProperty("--vpad-alpha", String(activeVpadOpacityPct() / 100));
 	for (const item of VPAD_ITEMS) {
+		if (!edit && !vpadKeyAllowed(item.id)) continue;
 		const el = document.createElement("div");
 		el.setAttribute("role", "button");
 		el.dataset.vpadId = item.id;
@@ -2972,7 +3218,8 @@ function bindVpadPlay(el, item) {
 }
 
 function syncVpadUi() {
-	vpadOn = !!settings.vpadEnabled;
+	const guestKeys = !share.isGuest || !Array.isArray(share.vpadKeys) || share.vpadKeys.length > 0;
+	vpadOn = share.isGuest ? (!!share.vpad && guestKeys) : !!settings.vpadEnabled;
 	const btn = $("btn-vpad");
 	if (btn) btn.setAttribute("aria-pressed", vpadOn ? "true" : "false");
 	const pad = $("vpad");
@@ -2994,6 +3241,7 @@ function closeVpadEditor() {
 	$("vpad-editor-modal").classList.add("hidden");
 	saveSettings();
 	syncVpadUi();
+	shareBroadcastVpadSkin();
 }
 
 function pollInput() {
@@ -4374,11 +4622,24 @@ function bindUi() {
 		if (file) setVpadCustomImage(file);
 	};
 	fillVpadThemePickers();
+	fillShareVpadKeyPicker();
+	$("share-vpad-keys-all")?.addEventListener("click", () => {
+		setShareVpadKeysChecked(true);
+		if (share.active) saveShare();
+	});
+	$("share-vpad-keys-none")?.addEventListener("click", () => {
+		setShareVpadKeysChecked(false);
+		if (share.active) saveShare();
+	});
 	$("vpad-editor-opacity").oninput = () => {
 		settings.vpadOpacity = clamp(Number($("vpad-editor-opacity").value) || 55, 1, 100);
 		applyVpadOpacity();
+		shareBroadcastVpadSkin(250);
 	};
-	$("vpad-editor-opacity").onchange = saveSettings;
+	$("vpad-editor-opacity").onchange = () => {
+		saveSettings();
+		shareBroadcastVpadSkin();
+	};
 	$("btn-stop").onclick = () => {
 		if (share.isGuest) {
 			location.replace(location.pathname);
@@ -4490,8 +4751,9 @@ function bindUi() {
 		$("share-error")?.classList.add("ok");
 		setTimeout(() => { $("share-error")?.classList.remove("ok"); showShareError(""); }, 1600);
 	};
-	["share-opt-video", "share-opt-audio", "share-opt-gamepad"].forEach((id) => {
+	["share-opt-video", "share-opt-audio", "share-opt-vpad", "share-opt-gamepad"].forEach((id) => {
 		$(id)?.addEventListener("change", () => {
+			if (id === "share-opt-vpad") syncShareVpadKeysPanel();
 			if (share.active) saveShare();
 		});
 	});

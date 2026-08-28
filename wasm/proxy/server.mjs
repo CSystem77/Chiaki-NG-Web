@@ -803,6 +803,7 @@ async function handleApi(req, res, reqUrl) {
 			audio: share.audio,
 			vpad: share.vpad,
 			gamepad: share.gamepad,
+			vpadKeys: share.vpadKeys,
 			viewers: shareHub.viewerCount(share.token)
 		});
 		return true;

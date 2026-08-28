@@ -386,10 +386,21 @@
 	<div id="share-modal" class="modal hidden">
 		<div class="modal-card">
 			<h3 data-i18n="share.title">Share stream</h3>
-			<p class="hint" data-i18n="share.help">While you stream, people with the link receive video, audio and/or a physical gamepad according to the rights you allow. The virtual pad follows the stream.</p>
+			<p class="hint" data-i18n="share.help">While you stream, people with the link receive video, audio and, if you allow it, the virtual pad or a physical gamepad. The virtual pad uses your theme.</p>
 			<p id="share-stream-state" class="account-meta share-stream-state"></p>
 			<label class="check-label"><input id="share-opt-video" type="checkbox" checked> <span data-i18n="share.video">Video</span></label>
 			<label class="check-label"><input id="share-opt-audio" type="checkbox" checked> <span data-i18n="share.audio">Audio</span></label>
+			<label class="check-label"><input id="share-opt-vpad" type="checkbox" checked> <span data-i18n="share.vpad">Virtual pad</span></label>
+			<div id="share-vpad-keys" class="share-vpad-keys">
+				<div class="share-vpad-keys-head">
+					<span data-i18n="share.vpadKeys">Buttons shown to viewers</span>
+					<span class="share-vpad-keys-actions">
+						<button type="button" class="ghost" id="share-vpad-keys-all" data-i18n="share.vpadKeysAll">All</button>
+						<button type="button" class="ghost" id="share-vpad-keys-none" data-i18n="share.vpadKeysNone">None</button>
+					</span>
+				</div>
+				<div id="share-vpad-keys-list" class="share-vpad-keys-list"></div>
+			</div>
 			<label class="check-label"><input id="share-opt-gamepad" type="checkbox"> <span data-i18n="share.gamepad">Physical gamepad</span></label>
 			<p class="account-meta"><span data-i18n="share.viewers">Viewers</span> <span id="share-viewers">0</span></p>
 			<label><span data-i18n="share.link">Link</span>
