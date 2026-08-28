@@ -171,6 +171,8 @@ const defaultSettings = {
 	vpadEnabled: false,
 	vpadLayout: {},
 	vpadOpacity: 55,
+	vpadTheme: "classic",
+	vpadCustom: {},
 	language: "en",
 	discoveryEnabled: true,
 	keymap: { ...defaultKeymap },
@@ -262,6 +264,9 @@ function loadSettings() {
 	settings.keymap = maps.keymap;
 	settings.mousemap = maps.mousemap;
 	if (!settings.vpadLayout || typeof settings.vpadLayout !== "object") settings.vpadLayout = {};
+	if (!settings.vpadCustom || typeof settings.vpadCustom !== "object") settings.vpadCustom = {};
+	if (!["classic", "dualsense", "xbox", "outline", "neon"].includes(settings.vpadTheme))
+		settings.vpadTheme = "classic";
 	settings.vpadOpacity = Math.max(1, Math.min(100, Number(settings.vpadOpacity) || 55));
 	settings.mouseSens = clamp(Number(settings.mouseSens) || 80, 10, 200);
 	if (!parsed.mouseStickDefaultRs) {
@@ -331,6 +336,8 @@ function saveSettings() {
 		mouseSens: clamp(Number($("s-mouse-sens").value) || 80, 10, 200),
 		mouseInvertY: $("s-mouse-invert").checked,
 		vpadOpacity: vpadOpacityPct(),
+		vpadTheme: vpadThemeId(),
+		vpadCustom: settings.vpadCustom && typeof settings.vpadCustom === "object" ? settings.vpadCustom : {},
 		language: $("s-language").value,
 		discoveryEnabled: $("s-discovery")?.value !== "false",
 		keymap: { ...defaultKeymap, ...(settings.keymap || {}) },
@@ -1352,7 +1359,7 @@ function mergeGuestPad(buttons, l2, r2, lx, ly, rx, ry) {
 function guestPadSnapshot() {
 	let buttons = 0, l2 = 0, r2 = 0, lx = 0, ly = 0, rx = 0, ry = 0;
 	if (share.gamepad) {
-		const gp = navigator.getGamepads && navigator.getGamepads()[0];
+		const gp = pickGamepad();
 		if (gp) {
 			if (gp.buttons[0]?.pressed) buttons |= BTN.CROSS;
 			if (gp.buttons[1]?.pressed) buttons |= BTN.MOON;
@@ -2448,6 +2455,57 @@ function padStickAxes(gp) {
 	return { lx, ly, rx, ry };
 }
 
+let activePadIndex = -1;
+
+function listGamepads() {
+	const raw = navigator.getGamepads ? navigator.getGamepads() : [];
+	const out = [];
+	for (let i = 0; i < raw.length; i++) {
+		const gp = raw[i];
+		if (gp && gp.connected && (gp.buttons?.length || 0) >= 8)
+			out.push(gp);
+	}
+	return out;
+}
+
+function scorePad(gp) {
+	const id = String(gp.id || "").toLowerCase();
+	if (/dualshock|dualsense|wireless controller|sony|playstation|ps[45]|ds4|ds5/.test(id))
+		return 4;
+	if (gp.mapping === "standard") return 3;
+	if (/xinput|xbox/.test(id)) return 2;
+	return 1;
+}
+
+function pickGamepad() {
+	const pads = listGamepads();
+	if (!pads.length) {
+		activePadIndex = -1;
+		return null;
+	}
+	const kept = pads.find((p) => p.index === activePadIndex);
+	if (kept) return kept;
+	pads.sort((a, b) => scorePad(b) - scorePad(a) || a.index - b.index);
+	activePadIndex = pads[0].index;
+	return pads[0];
+}
+
+function refreshPadStatus() {
+	const gp = pickGamepad();
+	const el = $("pad-status");
+	if (el) el.textContent = gp ? (gp.id || t("controllers.connected")) : t("controllers.none");
+	return gp;
+}
+
+function onGamepadHotplug(ev) {
+	if (ev.type === "gamepadconnected" && ev.gamepad)
+		activePadIndex = ev.gamepad.index;
+	else if (ev.type === "gamepaddisconnected" && ev.gamepad?.index === activePadIndex)
+		activePadIndex = -1;
+	try { navigator.getGamepads?.(); } catch {}
+	refreshPadStatus();
+}
+
 function sleep(ms) {
 	return new Promise((r) => setTimeout(r, ms));
 }
@@ -2487,6 +2545,150 @@ const VPAD_DEFAULTS = {
 	ps: { x: 50, y: 90 },
 	l3: { x: 8, y: 90 }, r3: { x: 92, y: 90 }
 };
+
+const VPAD_THEMES = [
+	{ id: "classic", nameKey: "vpad.theme.classic" },
+	{ id: "dualsense", nameKey: "vpad.theme.dualsense" },
+	{ id: "xbox", nameKey: "vpad.theme.xbox" },
+	{ id: "outline", nameKey: "vpad.theme.outline" },
+	{ id: "neon", nameKey: "vpad.theme.neon" }
+];
+
+let vpadEditSelected = null;
+
+function vpadThemeId() {
+	const id = String(settings.vpadTheme || "classic");
+	return VPAD_THEMES.some((t) => t.id === id) ? id : "classic";
+}
+
+function vpadCustomOf(id) {
+	const map = settings.vpadCustom;
+	if (!map || typeof map !== "object") return "";
+	const url = map[id];
+	return typeof url === "string" && url.startsWith("data:image/") ? url : "";
+}
+
+function vpadSvg(inner, color) {
+	return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" class="vpad-glyph" aria-hidden="true">${inner}</svg>`;
+}
+
+function vpadThemeGlyph(item) {
+	const theme = vpadThemeId();
+	const id = item.id;
+	if (theme === "xbox") {
+		if (id === "cross") return `<span class="vpad-letter" style="color:#3ddc84">A</span>`;
+		if (id === "moon") return `<span class="vpad-letter" style="color:#ff5a5a">B</span>`;
+		if (id === "box") return `<span class="vpad-letter" style="color:#4aa3ff">X</span>`;
+		if (id === "pyramid") return `<span class="vpad-letter" style="color:#ffd54f">Y</span>`;
+	}
+	if (theme === "dualsense" || theme === "outline" || theme === "neon") {
+		if (id === "cross") return vpadSvg(`<path d="M9 9 L23 23 M23 9 L9 23" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>`, "");
+		if (id === "moon") return vpadSvg(`<circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="3"/>`, "");
+		if (id === "box") return vpadSvg(`<rect x="8" y="8" width="16" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2.8"/>`, "");
+		if (id === "pyramid") return vpadSvg(`<path d="M16 7 L26 25 H6 Z" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"/>`, "");
+	}
+	return "";
+}
+
+function vpadInnerHtml(item) {
+	const custom = vpadCustomOf(item.id);
+	if (custom) return `<img class="vpad-face" alt="" src="${custom}">`;
+	if (item.kind === "stick") return "";
+	const glyph = vpadThemeGlyph(item);
+	if (glyph) return glyph;
+	return `<span class="vpad-label">${item.label}</span>`;
+}
+
+function fillVpadThemePickers() {
+	const html = VPAD_THEMES.map((th) => (
+		`<button type="button" class="vpad-theme-chip" data-theme="${th.id}">` +
+		`<span class="vpad-theme-dots" data-theme="${th.id}" aria-hidden="true"></span>` +
+		`<span data-i18n="${th.nameKey}">${th.id}</span></button>`
+	)).join("");
+	["vpad-theme-picker", "vpad-theme-picker-editor"].forEach((id) => {
+		const el = $(id);
+		if (!el) return;
+		el.innerHTML = html;
+		el.querySelectorAll(".vpad-theme-chip").forEach((btn) => {
+			btn.onclick = () => setVpadTheme(btn.dataset.theme);
+		});
+	});
+	syncVpadThemeChips();
+}
+
+function syncVpadThemeChips() {
+	const cur = vpadThemeId();
+	document.querySelectorAll(".vpad-theme-chip").forEach((btn) => {
+		btn.classList.toggle("active", btn.dataset.theme === cur);
+	});
+}
+
+function setVpadTheme(id) {
+	settings.vpadTheme = VPAD_THEMES.some((t) => t.id === id) ? id : "classic";
+	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+	scheduleCloudPush();
+	syncVpadThemeChips();
+	renderVpad($("vpad"), false);
+	renderVpad($("vpad-editor-stage"), true);
+}
+
+function syncVpadCustomPanel() {
+	const id = vpadEditSelected;
+	const name = $("vpad-custom-name");
+	const pick = $("btn-vpad-custom");
+	const clear = $("btn-vpad-custom-clear");
+	if (!name || !pick || !clear) return;
+	if (!id) {
+		name.dataset.i18n = "vpad.customIdle";
+		name.textContent = t("vpad.customIdle");
+		pick.disabled = true;
+		clear.disabled = true;
+		return;
+	}
+	const item = VPAD_ITEMS.find((x) => x.id === id);
+	name.removeAttribute("data-i18n");
+	name.textContent = t("vpad.customFor", { name: item ? item.label : id });
+	pick.disabled = false;
+	clear.disabled = !vpadCustomOf(id);
+}
+
+async function setVpadCustomImage(file) {
+	if (!vpadEditSelected || !file || !file.type.startsWith("image/")) return;
+	const url = URL.createObjectURL(file);
+	try {
+		const img = await new Promise((resolve, reject) => {
+			const el = new Image();
+			el.onload = () => resolve(el);
+			el.onerror = reject;
+			el.src = url;
+		});
+		const c = document.createElement("canvas");
+		c.width = 96;
+		c.height = 96;
+		c.getContext("2d").drawImage(img, 0, 0, 96, 96);
+		const data = c.toDataURL("image/png");
+		settings.vpadCustom = { ...(settings.vpadCustom || {}), [vpadEditSelected]: data };
+		localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+		scheduleCloudPush();
+		renderVpad($("vpad"), false);
+		renderVpad($("vpad-editor-stage"), true);
+		syncVpadCustomPanel();
+	} finally {
+		URL.revokeObjectURL(url);
+	}
+}
+
+function clearVpadCustomImage() {
+	if (!vpadEditSelected) return;
+	const next = { ...(settings.vpadCustom || {}) };
+	delete next[vpadEditSelected];
+	settings.vpadCustom = next;
+	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+	scheduleCloudPush();
+	renderVpad($("vpad"), false);
+	renderVpad($("vpad-editor-stage"), true);
+	syncVpadCustomPanel();
+}
 
 function vpadOpacityPct() {
 	const raw = Number(settings.vpadOpacity);
@@ -2559,13 +2761,15 @@ function renderVpad(root, edit) {
 	root.innerHTML = "";
 	if (edit) root.classList.add("vpad-edit");
 	else root.classList.remove("vpad-edit");
+	root.dataset.theme = vpadThemeId();
 	root.style.setProperty("--vpad-alpha", String(vpadOpacityPct() / 100));
 	for (const item of VPAD_ITEMS) {
 		const el = document.createElement("div");
 		el.setAttribute("role", "button");
 		el.dataset.vpadId = item.id;
 		el.className = (item.kind === "stick" ? "vpad-stick" : "vpad-btn") + (item.cls ? " " + item.cls : "");
-		el.textContent = item.kind === "stick" ? "" : item.label;
+		if (vpadCustomOf(item.id)) el.classList.add("has-face");
+		el.innerHTML = vpadInnerHtml(item);
 		if (item.kind === "stick") {
 			const knob = document.createElement("span");
 			knob.className = "vpad-knob";
@@ -2576,10 +2780,16 @@ function renderVpad(root, edit) {
 		if (edit) bindVpadDrag(el, item, root);
 		else bindVpadPlay(el, item);
 	}
+	if (edit && vpadEditSelected) {
+		const sel = root.querySelector(`[data-vpad-id="${vpadEditSelected}"]`);
+		if (sel) selectVpadEdit(root, sel);
+	}
 }
 
 function selectVpadEdit(root, el) {
 	root.querySelectorAll(".vpad-btn, .vpad-stick").forEach((n) => n.classList.toggle("selected", n === el));
+	vpadEditSelected = el?.dataset?.vpadId || null;
+	syncVpadCustomPanel();
 }
 
 function bindVpadDrag(el, item, root) {
@@ -2770,15 +2980,7 @@ function syncVpadUi() {
 	pad.classList.toggle("hidden", !vpadOn);
 	pad.setAttribute("aria-hidden", vpadOn ? "false" : "true");
 	applyVpadOpacity();
-	if (vpadOn) {
-		if (!pad.childElementCount) renderVpad(pad, false);
-		else {
-			for (const item of VPAD_ITEMS) {
-				const el = pad.querySelector(`[data-vpad-id="${item.id}"]`);
-				if (el) applyVpadStyle(el, item);
-			}
-		}
-	}
+	if (vpadOn) renderVpad(pad, false);
 	syncPointerLock();
 }
 
@@ -2795,12 +2997,10 @@ function closeVpadEditor() {
 }
 
 function pollInput() {
+	const gp = refreshPadStatus();
 	if (!streaming) return;
 	if (typeof api.sessionSetController !== "function") return;
 	let buttons = 0, l2 = 0, r2 = 0, lx = 0, ly = 0, rx = 0, ry = 0;
-	const gp = navigator.getGamepads && navigator.getGamepads()[0];
-	const padStatus = $("pad-status");
-	if (padStatus) padStatus.textContent = gp ? (gp.id || t("controllers.connected")) : t("controllers.none");
 	if (gp) {
 		if (gp.buttons[0]?.pressed) buttons |= BTN.CROSS;
 		if (gp.buttons[1]?.pressed) buttons |= BTN.MOON;
@@ -4166,6 +4366,14 @@ function bindUi() {
 	$("btn-vpad-reset").onclick = resetVpadLayout;
 	$("vpad-editor-done").onclick = closeVpadEditor;
 	$("vpad-editor-reset").onclick = resetVpadLayout;
+	$("btn-vpad-custom").onclick = () => $("vpad-custom-file")?.click();
+	$("btn-vpad-custom-clear").onclick = clearVpadCustomImage;
+	$("vpad-custom-file").onchange = (e) => {
+		const file = e.target.files && e.target.files[0];
+		e.target.value = "";
+		if (file) setVpadCustomImage(file);
+	};
+	fillVpadThemePickers();
 	$("vpad-editor-opacity").oninput = () => {
 		settings.vpadOpacity = clamp(Number($("vpad-editor-opacity").value) || 55, 1, 100);
 		applyVpadOpacity();
@@ -4614,6 +4822,9 @@ function bindUi() {
 	document.addEventListener("pointerup", onVpadPointerUp, { capture: true });
 	document.addEventListener("pointercancel", onVpadPointerUp, { capture: true });
 	setInterval(pollInput, 8);
+	window.addEventListener("gamepadconnected", onGamepadHotplug);
+	window.addEventListener("gamepaddisconnected", onGamepadHotplug);
+	window.addEventListener("focus", () => { try { navigator.getGamepads?.(); } catch {} refreshPadStatus(); });
 }
 
 function bindModule() {
@@ -4677,8 +4888,11 @@ function bindModule() {
 			shareOnStreaming(true);
 		}
 		if (type === "pin") $("pin-modal").classList.remove("hidden");
-		if (type === "rumble" && navigator.getGamepads?.()[0]?.vibrationActuator)
-			navigator.getGamepads()[0].vibrationActuator.playEffect("dual-rumble", { duration: 80, strongMagnitude: code / 255, weakMagnitude: Number(detail) / 255 });
+		if (type === "rumble") {
+			const pad = pickGamepad();
+			if (pad?.vibrationActuator)
+				pad.vibrationActuator.playEffect("dual-rumble", { duration: 80, strongMagnitude: code / 255, weakMagnitude: Number(detail) / 255 });
+		}
 		if (type === "nickname") {
 			if (detail) {
 				streamTitleName = detail;

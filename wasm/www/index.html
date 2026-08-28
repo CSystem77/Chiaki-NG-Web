@@ -322,6 +322,11 @@
 					</div>
 					<p class="hint" data-i18n="vpad.hint">The on-screen virtual pad is toggled from the stream toolbar. Place its buttons below.</p>
 					<div class="form-row">
+						<label data-i18n="vpad.theme">Theme:</label>
+						<div id="vpad-theme-picker" class="vpad-theme-picker"></div>
+					</div>
+					<p class="hint" data-i18n="vpad.themeHelp">Choose a supplied skin, then optionally assign your own image to each button in the layout editor.</p>
+					<div class="form-row">
 						<label data-i18n="vpad.layout">Virtual pad:</label>
 						<button type="button" class="ghost" id="btn-vpad-layout" data-i18n="vpad.place">Place buttons</button>
 					</div>
@@ -556,11 +561,21 @@
 			<div id="vpad-editor-stage" class="vpad-stage vpad-edit"></div>
 			<div class="vpad-editor-footer">
 				<div class="vpad-editor-tools">
+					<label data-i18n="vpad.theme">Theme:</label>
+					<div id="vpad-theme-picker-editor" class="vpad-theme-picker"></div>
+				</div>
+				<div class="vpad-editor-tools">
 					<label data-i18n="vpad.opacity">Button transparency:</label>
 					<div class="range-row">
 						<input id="vpad-editor-opacity" type="range" min="1" max="100" step="1" value="55">
 						<output id="vpad-editor-opacity-val">55 %</output>
 					</div>
+				</div>
+				<div class="vpad-editor-tools vpad-custom-tools">
+					<span id="vpad-custom-name" class="vpad-custom-name" data-i18n="vpad.customIdle">Select a button to assign a custom image.</span>
+					<button type="button" class="ghost" id="btn-vpad-custom" data-i18n="vpad.customImage" disabled>Use image</button>
+					<button type="button" class="ghost" id="btn-vpad-custom-clear" data-i18n="vpad.customClear" disabled>Remove image</button>
+					<input id="vpad-custom-file" type="file" accept="image/*" hidden>
 				</div>
 				<p class="vpad-editor-hint" data-i18n="vpad.editorHelp">Drag a button to move it. Use the corner handle or the mouse wheel to resize.</p>
 			</div>
