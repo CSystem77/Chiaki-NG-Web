@@ -938,7 +938,8 @@ function applyShareVpadKeysForm(list) {
 }
 
 function syncShareVpadKeysPanel() {
-	$("share-vpad-keys")?.classList.toggle("hidden", !$("share-opt-vpad")?.checked);
+	const on = !!$("share-opt-vpad")?.checked || !!$("share-opt-gamepad")?.checked;
+	$("share-vpad-keys")?.classList.toggle("hidden", !on);
 }
 
 function syncShareVpadGroupChecks() {
@@ -1523,7 +1524,7 @@ function mergeGuestPad(buttons, l2, r2, lx, ly, rx, ry) {
 	if (!share.active || share.isGuest || (!share.vpad && !share.gamepad))
 		return { buttons, l2, r2, lx, ly, rx, ry };
 	for (const p of share.guestPads.values()) {
-		const src = share.gamepad ? p : filterPadByVpadKeys(p, share.vpadKeys);
+		const src = filterPadByVpadKeys(p, share.vpadKeys);
 		buttons |= Number(src.buttons) || 0;
 		l2 = Math.max(l2, Number(src.l2) || 0);
 		r2 = Math.max(r2, Number(src.r2) || 0);
@@ -1566,22 +1567,14 @@ function guestPadSnapshot() {
 		}
 	}
 	if (share.vpad && vpadOn) {
-		const pad = filterPadByVpadKeys({
-			buttons: vpad.buttons,
-			l2: vpad.l2,
-			r2: vpad.r2,
-			lx: vpadStickActive("ls") ? vpad.lx : 0,
-			ly: vpadStickActive("ls") ? vpad.ly : 0,
-			rx: vpadStickActive("rs") ? vpad.rx : 0,
-			ry: vpadStickActive("rs") ? vpad.ry : 0
-		}, share.vpadKeys);
-		buttons |= pad.buttons;
-		l2 = Math.max(l2, pad.l2);
-		r2 = Math.max(r2, pad.r2);
-		if (pad.lx || pad.ly) { lx = pad.lx; ly = pad.ly; }
-		if (pad.rx || pad.ry) { rx = pad.rx; ry = pad.ry; }
+		buttons |= vpad.buttons;
+		l2 = Math.max(l2, vpad.l2);
+		r2 = Math.max(r2, vpad.r2);
+		if (vpadStickActive("ls")) { lx = vpad.lx; ly = vpad.ly; }
+		if (vpadStickActive("rs")) { rx = vpad.rx; ry = vpad.ry; }
 	}
-	return { type: "pad", buttons, l2, r2, lx, ly, rx, ry };
+	const pad = filterPadByVpadKeys({ buttons, l2, r2, lx, ly, rx, ry }, share.vpadKeys);
+	return { type: "pad", ...pad };
 }
 
 async function bootGuest(token) {
@@ -4753,7 +4746,7 @@ function bindUi() {
 	};
 	["share-opt-video", "share-opt-audio", "share-opt-vpad", "share-opt-gamepad"].forEach((id) => {
 		$(id)?.addEventListener("change", () => {
-			if (id === "share-opt-vpad") syncShareVpadKeysPanel();
+			if (id === "share-opt-vpad" || id === "share-opt-gamepad") syncShareVpadKeysPanel();
 			if (share.active) saveShare();
 		});
 	});

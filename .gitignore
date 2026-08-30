@@ -47,6 +47,7 @@ wasm/node_modules
 wasm/electron/node_modules
 wasm/electron/dist
 wasm/electron/.stage
+/darkChiaki/
 wasm/build/
 /tools/protoc
 /tools/wasm-python

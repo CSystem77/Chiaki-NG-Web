@@ -455,6 +455,7 @@ class PosixBridge {
 const MIME = {
 	".html": "text/html; charset=utf-8",
 	".js": "text/javascript; charset=utf-8",
+	".mjs": "text/javascript; charset=utf-8",
 	".css": "text/css; charset=utf-8",
 	".wasm": "application/wasm",
 	".json": "application/json",
@@ -499,7 +500,7 @@ function sendFile(req, res, file) {
 			ETag: etag,
 			"Content-Type": MIME[ext] || "application/octet-stream"
 		};
-		headers["Cache-Control"] = [".html", ".js", ".css", ".json"].includes(ext)
+		headers["Cache-Control"] = [".html", ".js", ".mjs", ".css", ".json"].includes(ext)
 			? "no-store"
 			: "public, max-age=60, must-revalidate";
 		if (req.headers["if-none-match"] === etag) {

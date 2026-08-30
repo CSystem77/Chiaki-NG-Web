@@ -1458,13 +1458,17 @@ kbd {
 	transform: rotate(45deg);
 }
 .share-vpad-keys {
-	margin: -4px 0 12px 28px;
+	margin: 0 0 12px;
 	padding: 10px 12px;
 	border: 1px solid var(--border);
 	border-radius: 8px;
 	background: rgba(0, 0, 0, 0.18);
 }
 .share-vpad-keys.hidden { display: none; }
+.share-vpad-keys-help {
+	margin: 0 0 10px;
+	font-size: 12px;
+}
 .share-vpad-keys-head {
 	display: flex;
 	align-items: center;
