@@ -1385,6 +1385,26 @@ kbd {
 	pointer-events: auto;
 }
 .overlay.error { color: #ff8a80; }
+.overlay.paused {
+	color: #ffe082;
+	background: #000;
+	z-index: 20;
+}
+.share-pause-cover {
+	position: absolute;
+	inset: 0;
+	background: #000;
+	z-index: 15;
+	pointer-events: none;
+}
+body.share-guest #video {
+	visibility: hidden !important;
+	opacity: 0 !important;
+}
+.stage.share-paused .share-video,
+.share-video.share-paused {
+	display: none !important;
+}
 
 .share-banner {
 	position: fixed;
@@ -1465,9 +1485,53 @@ kbd {
 	background: rgba(0, 0, 0, 0.18);
 }
 .share-vpad-keys.hidden { display: none; }
+#share-keyword-block.hidden { display: none; }
 .share-vpad-keys-help {
 	margin: 0 0 10px;
 	font-size: 12px;
+}
+#share-modal .share-keywords-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 0 0 8px;
+	color: var(--muted);
+	font-size: 13px;
+}
+#share-modal .share-keywords-field textarea {
+	width: 100%;
+	min-height: 72px;
+	resize: vertical;
+	background: #303030;
+	border: 1px solid var(--border);
+	border-radius: 2px;
+	padding: 8px 10px;
+	color: #fff;
+	font: inherit;
+}
+#share-modal .share-keywords-help {
+	margin: 0 0 6px;
+	font-size: 12px;
+}
+#share-modal .share-keyword-delay-warn {
+	margin: 0 0 10px;
+	padding: 8px 10px;
+	border-radius: 6px;
+	border: 1px solid rgba(255, 224, 130, 0.35);
+	background: rgba(255, 224, 130, 0.08);
+	color: #ffe082;
+	font-size: 12px;
+	line-height: 1.4;
+}
+#share-modal .share-keyword-delay-warn.hidden { display: none; }
+#share-modal .share-keyword-status {
+	min-height: 0;
+	margin: 0 0 12px;
+	word-break: break-word;
+}
+#share-modal .share-keyword-status:empty {
+	display: none;
+	margin: 0;
 }
 .share-vpad-keys-head {
 	display: flex;

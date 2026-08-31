@@ -359,6 +359,7 @@ export function openStore(cfg) {
 				allowRegister: cfg.allowRegister,
 				maxHosts: cfg.maxHosts,
 				discoveryEnabled: cfg.discoveryEnabled !== false,
+				shareKeywordPause: cfg.shareKeywordPause === true,
 				user: publicUser(user)
 			};
 		},
@@ -446,6 +447,11 @@ export function openStore(cfg) {
 		getShareByToken(token) {
 			const row = qShareByToken.get(String(token || "").trim());
 			return row ? { ...publicShare(row), userId: row.user_id } : null;
+		},
+		shareLanguage(userId) {
+			if (!userId) return "en";
+			const lang = String(readProfile(userId).settings?.language || "").toLowerCase();
+			return lang.startsWith("fr") ? "fr" : "en";
 		},
 		saveShare(userId, body, regenerate) {
 			const rights = rightsFrom(body || {});

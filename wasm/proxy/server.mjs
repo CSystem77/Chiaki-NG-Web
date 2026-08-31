@@ -805,6 +805,7 @@ async function handleApi(req, res, reqUrl) {
 			vpad: share.vpad,
 			gamepad: share.gamepad,
 			vpadKeys: share.vpadKeys,
+			language: store.shareLanguage(share.userId),
 			viewers: shareHub.viewerCount(share.token)
 		});
 		return true;
@@ -1054,6 +1055,7 @@ export async function startServers() {
 	console.log(`SQLite: ${cfg.dbPath}`);
 	console.log(`Auth: ${cfg.authEnabled ? "activée" : "désactivée"}`);
 	console.log(`Découverte LAN: ${cfg.discoveryEnabled ? "activée" : "désactivée"}`);
+	console.log(`Pause mot-clé: ${cfg.shareKeywordPause ? "activée" : "désactivée"}`);
 	console.log("COOP/COEP activés (SharedArrayBuffer / pthreads).");
 
 	if (lanHttps) {

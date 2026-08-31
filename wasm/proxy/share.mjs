@@ -139,7 +139,13 @@ export function createShareHub({ store, decodeWsFrame, wsAccept, readCookie }) {
 				send(socket, { type: "guest-join", id: gid, viewers: room.guests.size });
 		} else {
 			room.guests.set(id, socket);
-			send(socket, { type: "hello", role: "guest", rights: share, viewers: room.guests.size });
+			send(socket, {
+				type: "hello",
+				role: "guest",
+				rights: share,
+				language: store.shareLanguage(share.userId),
+				viewers: room.guests.size
+			});
 			if (room.host) send(room.host, { type: "guest-join", id, viewers: room.guests.size });
 		}
 

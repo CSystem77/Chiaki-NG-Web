@@ -69,6 +69,7 @@ export function loadEnv() {
 		dbName,
 		dbPath: path.join(dbDir, dbName),
 		maxHosts: Math.max(1, Number(process.env.CHIAKI_MAX_HOSTS || 32)),
-		discoveryEnabled: bool(process.env.CHIAKI_DISCOVERY_ENABLED, true)
+		discoveryEnabled: bool(process.env.CHIAKI_DISCOVERY_ENABLED, true),
+		shareKeywordPause: bool(process.env.CHIAKI_SHARE_KEYWORD_PAUSE, false)
 	};
 }

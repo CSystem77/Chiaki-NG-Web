@@ -91,6 +91,25 @@ function detectLanguage() {
 	return (navigator.language || "en").toLowerCase().startsWith("fr") ? "fr" : "en";
 }
 
+function shareLangCode(raw) {
+	return String(raw || "").toLowerCase().startsWith("fr") ? "fr" : "en";
+}
+
+function uiLanguage() {
+	if (share.isGuest && share.hostLang) return shareLangCode(share.hostLang);
+	return settings.language === "fr" ? "fr" : "en";
+}
+
+async function applyShareHostLanguage(raw) {
+	const code = shareLangCode(raw);
+	if (share.hostLang === code) return;
+	share.hostLang = code;
+	if (!share.isGuest) return;
+	await loadI18n(code);
+	applyI18n();
+	refreshGuestOverlay();
+}
+
 async function loadI18n(lang) {
 	const code = lang === "fr" ? "fr" : "en";
 	const fetchJson = async (url) => {
@@ -115,7 +134,7 @@ async function loadI18n(lang) {
 }
 
 function applyI18n() {
-	document.documentElement.lang = settings.language === "fr" ? "fr" : "en";
+	document.documentElement.lang = uiLanguage();
 	document.querySelectorAll("[data-i18n]").forEach((el) => {
 		el.textContent = t(el.dataset.i18n);
 	});
@@ -176,7 +195,9 @@ const defaultSettings = {
 	language: "en",
 	discoveryEnabled: true,
 	keymap: { ...defaultKeymap },
-	mousemap: { ...defaultMousemap }
+	mousemap: { ...defaultMousemap },
+	shareKeywordPause: false,
+	shareKeywords: ""
 };
 
 let i18n = {};
@@ -223,7 +244,7 @@ let svgIcons = { ps4: "", ps5: "" };
 let settings = { ...defaultSettings };
 let proxyUrl = "";
 let proxyState = "";
-let cloud = { authEnabled: false, allowRegister: true, maxHosts: 32, discoveryEnabled: true, user: null, ipv4: "" };
+let cloud = { authEnabled: false, allowRegister: true, maxHosts: 32, discoveryEnabled: true, shareKeywordPause: false, user: null, ipv4: "" };
 let cloudPushTimer = 0;
 let authUnlocked = null;
 let settingsReturnView = "welcome";
@@ -340,6 +361,8 @@ function saveSettings() {
 		vpadCustom: settings.vpadCustom && typeof settings.vpadCustom === "object" ? settings.vpadCustom : {},
 		language: $("s-language").value,
 		discoveryEnabled: $("s-discovery")?.value !== "false",
+		shareKeywordPause: $("share-opt-keyword-pause") ? $("share-opt-keyword-pause").checked : !!settings.shareKeywordPause,
+		shareKeywords: $("share-keywords") ? $("share-keywords").value : (settings.shareKeywords || ""),
 		keymap: { ...defaultKeymap, ...(settings.keymap || {}) },
 		mousemap: { ...defaultMousemap, ...(settings.mousemap || {}) }
 	};
@@ -367,6 +390,7 @@ async function applySettingsNow() {
 	if (settings.language !== langBefore) {
 		await loadI18n(settings.language);
 		applyI18n();
+		if (share.active && !share.isGuest) shareBroadcastState();
 	}
 }
 
@@ -852,11 +876,13 @@ const share = {
 	pcs: new Map(),
 	iceWait: new Map(),
 	guestPads: new Map(),
+	pendingGuests: new Set(),
 	vpadTheme: "",
 	vpadCustom: {},
 	vpadLayout: {},
 	vpadOpacity: 55,
 	vpadKeys: null,
+	hostLang: "",
 	media: null,
 	audioDest: null,
 	bannerDismissed: false,
@@ -864,7 +890,38 @@ const share = {
 	capCtx: null,
 	keepAlive: false,
 	keyTimer: null,
-	lastShareDraw: 0
+	lastShareDraw: 0,
+	paused: false,
+	keywordWatch: false,
+	ocrHay: "",
+	ocrErr: false,
+	ocrBusy: false,
+	ocrAt: 0,
+	ocrSnapAt: 0,
+	ocrSnapReady: false,
+	ocrMisses: 0,
+	ocrClearUntil: 0,
+	ocrPendingSnapAt: 0,
+	ocrMissStreak: 0,
+	ocrHitStreak: 0,
+	lastHitKey: "",
+	lastHitAt: 0,
+	pauseAt: 0,
+	ocrTimer: 0,
+	ocrBusyTimer: 0,
+	stageCanvas: null,
+	stageCtx: null,
+	delayRing: null,
+	delayI: 0,
+	delayAt: 0,
+	delayShownT: 0,
+	audioDelay: null,
+	ocrPort: null,
+	ocrTess: null,
+	ocrTessP: null,
+	ocrScriptP: null,
+	blankCanvas: null,
+	blankTrack: null
 };
 
 function shareTokenFromHash() {
@@ -903,6 +960,10 @@ function applyShareForm(data) {
 	if ($("share-opt-audio")) $("share-opt-audio").checked = data.audio !== false;
 	if ($("share-opt-vpad")) $("share-opt-vpad").checked = data.vpad !== false;
 	if ($("share-opt-gamepad")) $("share-opt-gamepad").checked = !!data.gamepad;
+	if ($("share-opt-keyword-pause")) $("share-opt-keyword-pause").checked = !!settings.shareKeywordPause;
+	if ($("share-keywords")) $("share-keywords").value = settings.shareKeywords || "";
+	updateShareKeywordStatus();
+	syncShareKeywordUi();
 	applyShareVpadKeysForm(data.vpadKeys);
 	syncShareVpadKeysPanel();
 }
@@ -940,6 +1001,706 @@ function applyShareVpadKeysForm(list) {
 function syncShareVpadKeysPanel() {
 	const on = !!$("share-opt-vpad")?.checked || !!$("share-opt-gamepad")?.checked;
 	$("share-vpad-keys")?.classList.toggle("hidden", !on);
+}
+
+function foldShareText(s) {
+	return String(s || "")
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/0/g, "o")
+		.replace(/1/g, "l")
+		.replace(/5/g, "s")
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim();
+}
+
+function parseShareKeywords() {
+	return String(settings.shareKeywords || "")
+		.split(/[\n,;]+/)
+		.map((s) => foldShareText(s))
+		.filter((s) => s.length >= 3);
+}
+
+function shareIlFold(s) {
+	return String(s || "").replace(/l/g, "i");
+}
+
+function shareOcrConfuseOk(a, b) {
+	if (a === b) return true;
+	const pairs = "il lo od ce ea bh uv mn ft pr";
+	return pairs.includes(a + b) || pairs.includes(b + a);
+}
+
+function shareWordFitsKey(word, key) {
+	if (!word || !key) return false;
+	if (word === key) return true;
+	if (word.length === key.length && shareIlFold(word) === shareIlFold(key)) return true;
+	if (word.length === key.length && key.length >= 4) {
+		let diff = 0;
+		for (let i = 0; i < key.length; i++) {
+			if (word[i] === key[i]) continue;
+			diff++;
+			if (diff > 1 || !shareOcrConfuseOk(word[i], key[i])) return false;
+		}
+		return diff <= 1;
+	}
+	if (key.length < 6) return false;
+	if (Math.abs(word.length - key.length) > 1) return false;
+	return shareEditDist(word, key, 1) <= 1;
+}
+
+function shareEditDist(a, b, max) {
+	if (Math.abs(a.length - b.length) > max) return max + 1;
+	const m = a.length;
+	const n = b.length;
+	let prev = new Array(n + 1);
+	let cur = new Array(n + 1);
+	for (let j = 0; j <= n; j++) prev[j] = j;
+	for (let i = 1; i <= m; i++) {
+		cur[0] = i;
+		let rowMin = cur[0];
+		for (let j = 1; j <= n; j++) {
+			const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+			cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+			if (cur[j] < rowMin) rowMin = cur[j];
+		}
+		if (rowMin > max) return max + 1;
+		const tmp = prev;
+		prev = cur;
+		cur = tmp;
+	}
+	return prev[n];
+}
+
+function shareKeywordHitIn(hay) {
+	const keys = parseShareKeywords();
+	if (!keys.length || !hay) return "";
+	const folded = foldShareText(hay);
+	if (!folded) return "";
+	const raw = folded.split(/\s+/).filter(Boolean);
+	const words = raw.filter((w) => w.length >= 2);
+	if (!raw.length) return "";
+	for (const k of keys) {
+		const parts = k.split(/\s+/).filter(Boolean);
+		const compact = parts.join("");
+		if (!compact) continue;
+		if (words.some((w) => shareWordFitsKey(w, compact))) return k;
+		if (parts.length > 1) {
+			for (let i = 0; i + parts.length <= words.length; i++) {
+				let ok = true;
+				for (let j = 0; j < parts.length; j++) {
+					if (!shareWordFitsKey(words[i + j], parts[j])) {
+						ok = false;
+						break;
+					}
+				}
+				if (ok) return k;
+			}
+		}
+		if (compact.length >= 4) {
+			for (let i = 0; i + 1 < raw.length; i++) {
+				if (raw[i] + raw[i + 1] === compact) return k;
+			}
+		}
+	}
+	return "";
+}
+
+function shareKeywordPauseAllowed() {
+	return cloud.shareKeywordPause === true;
+}
+
+function syncShareKeywordUi() {
+	$("share-keyword-block")?.classList.toggle("hidden", !shareKeywordPauseAllowed());
+	const on = shareKeywordPauseAllowed() && !!$("share-opt-keyword-pause")?.checked;
+	$("share-keyword-delay-warn")?.classList.toggle("hidden", !on);
+	if (!shareKeywordPauseAllowed()) stopShareKeywordWatch();
+}
+
+function persistShareKeywordSettings() {
+	if (!shareKeywordPauseAllowed()) {
+		stopShareKeywordWatch();
+		syncShareKeywordUi();
+		return;
+	}
+	if ($("share-opt-keyword-pause"))
+		settings.shareKeywordPause = $("share-opt-keyword-pause").checked;
+	if ($("share-keywords"))
+		settings.shareKeywords = $("share-keywords").value;
+	try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {}
+	scheduleCloudPush();
+	if (share.active && !share.isGuest) startShareKeywordWatch();
+	else stopShareKeywordWatch();
+	syncShareAudioDelay();
+	updateShareKeywordStatus();
+	syncShareKeywordUi();
+}
+
+function setShareKeywordStatus(text) {
+	const el = $("share-keyword-status");
+	if (!el) return;
+	el.textContent = text || "";
+}
+
+function updateShareKeywordStatus() {
+	if (!shareKeywordPauseAllowed() || !settings.shareKeywordPause) {
+		setShareKeywordStatus("");
+		return;
+	}
+	if (!share.active || !streaming) {
+		setShareKeywordStatus(t("share.keywordIdle"));
+		return;
+	}
+	if (share.ocrErr) {
+		setShareKeywordStatus(t("share.keywordErr"));
+		return;
+	}
+	if (share.paused && share.lastHitKey) {
+		setShareKeywordStatus(t("share.keywordHit", { k: share.lastHitKey }));
+		return;
+	}
+	setShareKeywordStatus("");
+}
+
+const SHARE_OCR_RESUME_MISSES = 1;
+const SHARE_OCR_HIT_STREAK = 1;
+const SHARE_OCR_RESUME_MS = 1600;
+const SHARE_KEYWORD_DELAY_MS = 2500;
+
+function shareDelayFps() {
+	return 20;
+}
+
+function shareKeywordDelayOn() {
+	return !share.isGuest && share.active && shareKeywordPauseAllowed() && !!settings.shareKeywordPause;
+}
+
+function keepAliveShareCap() {
+	const track = share.media?.getVideoTracks()[0];
+	if (track && typeof track.requestFrame === "function")
+		try { track.requestFrame(); } catch {}
+}
+
+function clearShareDelayQueue() {
+	share.delayAt = 0;
+	share.delayShownT = 0;
+	if (!share.delayRing) return;
+	for (const slot of share.delayRing) slot.t = 0;
+}
+
+function freeShareDelayRing() {
+	clearShareDelayQueue();
+	share.delayRing = null;
+	share.delayI = 0;
+	share.stageCanvas = null;
+	share.stageCtx = null;
+}
+
+function delaySlotSize() {
+	const cw = Math.max(2, share.capCanvas?.width || 1280);
+	const ch = Math.max(2, share.capCanvas?.height || 720);
+	let w = cw;
+	let h = ch;
+	if (w > 1280) {
+		h = Math.max(2, Math.round(ch * (1280 / w)));
+		w = 1280;
+	}
+	if (w & 1) w++;
+	if (h & 1) h++;
+	return [w, h];
+}
+
+function ensureShareStage() {
+	const c = share.capCanvas;
+	if (!c) return false;
+	if (share.stageCanvas && share.stageCanvas.width === c.width && share.stageCanvas.height === c.height)
+		return !!share.stageCtx;
+	const stage = document.createElement("canvas");
+	stage.width = c.width;
+	stage.height = c.height;
+	share.stageCanvas = stage;
+	share.stageCtx = stage.getContext("2d", { alpha: false });
+	if (share.stageCtx) {
+		share.stageCtx.imageSmoothingEnabled = false;
+		share.stageCtx.fillStyle = "#000";
+		share.stageCtx.fillRect(0, 0, stage.width, stage.height);
+	}
+	return !!share.stageCtx;
+}
+
+function ensureShareDelayRing() {
+	if (!share.capCanvas) return false;
+	const [w, h] = delaySlotSize();
+	const n = Math.ceil(shareDelayFps() * (SHARE_KEYWORD_DELAY_MS / 1000) + 4);
+	if (share.delayRing?.length === n && share.delayRing[0]?.canvas.width === w && share.delayRing[0]?.canvas.height === h)
+		return true;
+	const ring = [];
+	for (let i = 0; i < n; i++) {
+		const canvas = document.createElement("canvas");
+		canvas.width = w;
+		canvas.height = h;
+		const ctx = canvas.getContext("2d", { alpha: false });
+		if (ctx) {
+			ctx.imageSmoothingEnabled = false;
+			ctx.fillStyle = "#000";
+			ctx.fillRect(0, 0, w, h);
+		}
+		ring.push({ canvas, ctx, t: 0 });
+	}
+	share.delayRing = ring;
+	share.delayI = 0;
+	share.delayAt = 0;
+	share.delayShownT = 0;
+	return true;
+}
+
+function enqueueShareDelayFrame() {
+	if (!share.stageCanvas || !ensureShareDelayRing()) return;
+	const now = performance.now();
+	if (now - (share.delayAt || 0) < (1000 / shareDelayFps()) - 2) return;
+	const ring = share.delayRing;
+	const slot = ring[share.delayI % ring.length];
+	try {
+		slot.ctx.imageSmoothingEnabled = false;
+		slot.ctx.drawImage(share.stageCanvas, 0, 0, slot.canvas.width, slot.canvas.height);
+		slot.t = now;
+		share.delayAt = now;
+		share.delayI++;
+	} catch {}
+}
+
+function flushShareDelayQueue() {
+	if (!share.capCtx || !share.capCanvas) return;
+	if (share.paused || !share.delayRing) {
+		keepAliveShareCap();
+		return;
+	}
+	const now = performance.now();
+	const maxT = now - SHARE_KEYWORD_DELAY_MS;
+	if (!(maxT > 0)) {
+		keepAliveShareCap();
+		return;
+	}
+	let best = null;
+	for (const slot of share.delayRing) {
+		if (!slot.t || slot.t > maxT || slot.t <= (share.delayShownT || 0)) continue;
+		if (!best || slot.t > best.t) best = slot;
+	}
+	if (!best) {
+		keepAliveShareCap();
+		return;
+	}
+	try {
+		share.capCtx.imageSmoothingEnabled = false;
+		share.capCtx.drawImage(best.canvas, 0, 0, share.capCanvas.width, share.capCanvas.height);
+		share.lastShareDraw = now;
+		share.delayShownT = best.t;
+		keepAliveShareCap();
+	} catch {}
+}
+
+function syncShareAudioDelay() {
+	if (!audio.ctx || !audio.gain || !share.audioDest) return;
+	try { audio.gain.disconnect(share.audioDest); } catch {}
+	if (share.audioDelay) {
+		try { audio.gain.disconnect(share.audioDelay); } catch {}
+		try { share.audioDelay.disconnect(); } catch {}
+	}
+	if (shareKeywordDelayOn()) {
+		if (!share.audioDelay || share.audioDelay.delayTime.maxValue < SHARE_KEYWORD_DELAY_MS / 1000)
+			share.audioDelay = audio.ctx.createDelay(4);
+		share.audioDelay.delayTime.value = SHARE_KEYWORD_DELAY_MS / 1000;
+		try { audio.gain.connect(share.audioDelay); } catch {}
+		try { share.audioDelay.connect(share.audioDest); } catch {}
+	} else {
+		try { audio.gain.connect(share.audioDest); } catch {}
+	}
+}
+
+function clearOcrBusyWatch() {
+	if (share.ocrBusyTimer) {
+		clearTimeout(share.ocrBusyTimer);
+		share.ocrBusyTimer = 0;
+	}
+}
+
+function armOcrBusyWatch() {
+	clearOcrBusyWatch();
+	share.ocrBusyTimer = setTimeout(() => {
+		share.ocrBusyTimer = 0;
+		share.ocrBusy = false;
+	}, 4000);
+}
+
+function finishShareOcrBusy() {
+	share.ocrBusy = false;
+	clearOcrBusyWatch();
+}
+
+function ingestShareOcrText(text, err) {
+	if (!share.keywordWatch) return;
+	if (!share.active || share.isGuest || !shareKeywordPauseAllowed() || !settings.shareKeywordPause || !streaming) {
+		share.lastHitAt = 0;
+		share.lastHitKey = "";
+		share.ocrMissStreak = 0;
+		share.ocrHitStreak = 0;
+		setSharePaused(false);
+		updateShareKeywordStatus();
+		return;
+	}
+	if (err) {
+		share.ocrErr = true;
+		share.ocrHitStreak = 0;
+		share.ocrMissStreak = (share.ocrMissStreak || 0) + 1;
+		if (share.ocrMissStreak >= SHARE_OCR_RESUME_MISSES) {
+			const snapAt = share.ocrPendingSnapAt || 0;
+			if (snapAt > (share.ocrClearUntil || 0)) share.ocrClearUntil = snapAt;
+			if (share.paused) setSharePaused(false);
+		} else maybeResumeSharePause();
+		updateShareKeywordStatus();
+		return;
+	}
+	share.ocrErr = false;
+	share.ocrHay = String(text || "");
+	const hit = shareKeywordHitIn(share.ocrHay);
+	if (hit) {
+		share.lastHitAt = performance.now();
+		share.lastHitKey = hit;
+		share.ocrMissStreak = 0;
+		share.ocrHitStreak = (share.ocrHitStreak || 0) + 1;
+		if (share.ocrHitStreak >= SHARE_OCR_HIT_STREAK)
+			setSharePaused(true);
+	} else {
+		share.ocrHitStreak = 0;
+		const snapAt = share.ocrPendingSnapAt || 0;
+		if (snapAt > (share.ocrClearUntil || 0)) share.ocrClearUntil = snapAt;
+		share.ocrMissStreak = (share.ocrMissStreak || 0) + 1;
+		if (share.paused && share.ocrMissStreak >= SHARE_OCR_RESUME_MISSES) {
+			share.lastHitKey = "";
+			setSharePaused(false);
+		} else maybeResumeSharePause();
+	}
+	updateShareKeywordStatus();
+}
+
+function setSharePaused(on) {
+	on = !!on;
+	if (share.paused === on) {
+		if (on) drawSharePausedCanvas();
+		return;
+	}
+	share.paused = on;
+	clearShareDelayQueue();
+	applySharePauseMedia();
+	if (on) drawSharePausedCanvas();
+	else {
+		share.lastHitKey = "";
+		share.ocrClearUntil = performance.now();
+	}
+	shareReplaceOutgoingVideo();
+	if (!on) shareForceKeyframes();
+	shareBroadcastState();
+	updateShareBanners();
+}
+
+function maybeResumeSharePause() {
+	if (!share.paused || !share.keywordWatch) return;
+	if (performance.now() - (share.lastHitAt || 0) < SHARE_OCR_RESUME_MS) return;
+	share.lastHitKey = "";
+	share.ocrHitStreak = 0;
+	setSharePaused(false);
+}
+
+function applySharePauseMedia() {
+	if (!share.media) return;
+	for (const t of share.media.getAudioTracks()) {
+		try { t.enabled = !share.paused && share.audio !== false; } catch {}
+	}
+}
+
+function drawSharePausedCanvas() {
+	const c = share.capCanvas;
+	const ctx = share.capCtx;
+	if (!c || !ctx) return;
+	const w = c.width || 1280;
+	const h = c.height || 720;
+	ctx.fillStyle = "#000";
+	ctx.fillRect(0, 0, w, h);
+	share.lastShareDraw = performance.now();
+	const track = share.media?.getVideoTracks()[0];
+	if (track && typeof track.requestFrame === "function")
+		try { track.requestFrame(); } catch {}
+}
+
+function loadShareOcrScript() {
+	if (window.Tesseract) return Promise.resolve();
+	if (share.ocrScriptP) return share.ocrScriptP;
+	share.ocrScriptP = new Promise((resolve, reject) => {
+		const s = document.createElement("script");
+		s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+		s.async = true;
+		s.onload = () => resolve();
+		s.onerror = () => reject(new Error("ocr"));
+		document.head.appendChild(s);
+	});
+	return share.ocrScriptP;
+}
+
+async function ensureShareOcrTess() {
+	if (share.ocrTess) return share.ocrTess;
+	if (share.ocrTessP) return share.ocrTessP;
+	share.ocrTessP = (async () => {
+		await loadShareOcrScript();
+		if (!window.Tesseract) throw new Error("ocr");
+		const worker = await window.Tesseract.createWorker("fra+eng", 1, {
+			logger: () => {},
+			workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
+			corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.0/tesseract-core-simd.wasm.js",
+			langPath: "https://tessdata.projectnaptha.com/4.0.0"
+		});
+		try {
+			await worker.setParameters({
+				tessedit_pageseg_mode: "6",
+				preserve_interword_spaces: "1"
+			});
+		} catch {}
+		share.ocrTess = worker;
+		return worker;
+	})().catch((err) => {
+		share.ocrTessP = null;
+		throw err;
+	});
+	return share.ocrTessP;
+}
+
+async function ocrShareBlob(blob) {
+	if (!blob) return "";
+	if (typeof TextDetector === "function") {
+		try {
+			if (!share.textDetector) share.textDetector = new TextDetector();
+			const bmp = await createImageBitmap(blob);
+			const boxes = await share.textDetector.detect(bmp);
+			try { bmp.close(); } catch {}
+			const text = (boxes || []).map((b) => b.rawValue || "").join(" ").trim();
+			if (text && shareKeywordHitIn(text)) return text;
+		} catch {}
+	}
+	const tess = await ensureShareOcrTess();
+	const parts = [];
+	try {
+		const out = await tess.recognize(blob);
+		const t6 = (out && out.data && out.data.text) || "";
+		if (String(t6).trim()) parts.push(t6);
+	} catch {}
+	try {
+		await tess.setParameters({ tessedit_pageseg_mode: "11" });
+		const out = await tess.recognize(blob);
+		const t11 = (out && out.data && out.data.text) || "";
+		if (String(t11).trim()) parts.push(t11);
+		await tess.setParameters({ tessedit_pageseg_mode: "6" });
+	} catch {
+		try { await tess.setParameters({ tessedit_pageseg_mode: "6" }); } catch {}
+	}
+	return parts.join(" ");
+}
+
+function ensureShareOcrPort() {
+	if (share.ocrPort) return share.ocrPort;
+	let port;
+	try {
+		port = new Worker("share-ocr-worker.js");
+	} catch {
+		share.ocrErr = true;
+		return null;
+	}
+	port.onmessage = async (ev) => {
+		const data = ev.data || {};
+		finishShareOcrBusy();
+		try {
+			if (data.err) ingestShareOcrText("", true);
+			else if (typeof data.text === "string") ingestShareOcrText(data.text, false);
+			else if (data.blob) ingestShareOcrText(await ocrShareBlob(data.blob), false);
+			else ingestShareOcrText("", true);
+		} catch {
+			ingestShareOcrText("", true);
+		}
+		if (share.keywordWatch && !share.ocrBusy) {
+			maybeDrawOcrSnap(null, true);
+			maybeOfferShareOcrFromCap();
+		}
+	};
+	port.onerror = () => {
+		finishShareOcrBusy();
+		share.ocrErr = true;
+	};
+	share.ocrPort = port;
+	return port;
+}
+
+function ensureOcrSnapCanvas(w, h) {
+	w = Math.max(32, w | 0);
+	h = Math.max(32, h | 0);
+	if (!share.ocrSnap) {
+		share.ocrSnap = document.createElement("canvas");
+		share.ocrSnapCtx = share.ocrSnap.getContext("2d", { alpha: false });
+	}
+	if (share.ocrSnap.width !== w || share.ocrSnap.height !== h) {
+		share.ocrSnap.width = w;
+		share.ocrSnap.height = h;
+	}
+	return share.ocrSnapCtx;
+}
+
+function drawOcrSnapFrom(src, sx, sy, sw, sh) {
+	if (!src || !sw || !sh) return;
+	const w = Math.min(960, sw);
+	const scale = w / sw;
+	const fullH = Math.max(32, Math.round(sh * scale));
+	const bandSrc = Math.max(16, Math.round(sh * 0.26));
+	const bandH = Math.max(40, Math.round(bandSrc * scale * 1.65));
+	const totalH = bandH + fullH + bandH;
+	const ctx = ensureOcrSnapCanvas(w, totalH);
+	if (!ctx) return;
+	try {
+		ctx.imageSmoothingEnabled = true;
+		ctx.imageSmoothingQuality = "high";
+		ctx.fillStyle = "#000";
+		ctx.fillRect(0, 0, w, totalH);
+		ctx.drawImage(src, sx, sy, sw, bandSrc, 0, 0, w, bandH);
+		ctx.drawImage(src, sx, sy, sw, sh, 0, bandH, w, fullH);
+		ctx.drawImage(src, sx, sy + sh - bandSrc, sw, bandSrc, 0, bandH + fullH, w, bandH);
+		share.ocrSnapReady = true;
+	} catch {}
+}
+
+function drawOcrSnap(frame) {
+	if (!frame) return;
+	const d = videoFrameDest(frame);
+	if (!d.sw || !d.sh) return;
+	drawOcrSnapFrom(frame, d.sx, d.sy, d.sw, d.sh);
+}
+
+function maybeDrawOcrSnap(frame, force) {
+	if (!share.keywordWatch) return;
+	if (share.ocrBusy && !force) return;
+	const now = performance.now();
+	if (!force && now - (share.ocrSnapAt || 0) < 280) return;
+	try {
+		if (share.stageCanvas?.width)
+			drawOcrSnapFrom(share.stageCanvas, 0, 0, share.stageCanvas.width, share.stageCanvas.height);
+		else if (!share.paused && share.capCanvas?.width)
+			drawOcrSnapFrom(share.capCanvas, 0, 0, share.capCanvas.width, share.capCanvas.height);
+		else return;
+		share.ocrSnapAt = now;
+	} catch {}
+}
+
+function postShareOcrBlob(src) {
+	if (!src) {
+		finishShareOcrBusy();
+		return;
+	}
+	const send = (payload, transfer) => {
+		try {
+			const port = ensureShareOcrPort();
+			if (!port) {
+				finishShareOcrBusy();
+				return;
+			}
+			payload.keys = parseShareKeywords();
+			if (transfer) port.postMessage(payload, transfer);
+			else port.postMessage(payload);
+		} catch {
+			finishShareOcrBusy();
+		}
+	};
+	if (typeof src.toBlob !== "function") {
+		finishShareOcrBusy();
+		return;
+	}
+	try {
+		src.toBlob((blob) => {
+			if (!blob) {
+				finishShareOcrBusy();
+				return;
+			}
+			send({ blob });
+		}, "image/jpeg", 0.82);
+	} catch {
+		finishShareOcrBusy();
+	}
+}
+
+function maybeOfferShareOcrFromCap() {
+	if (!shareKeywordPauseAllowed() || !share.keywordWatch || share.ocrBusy) return;
+	if (!share.pcs.size && !(Number(share.viewers) > 0)) return;
+	if (!share.ocrSnapReady || !share.ocrSnap || !share.ocrSnap.width) {
+		maybeDrawOcrSnap(null, true);
+		if (!share.ocrSnapReady) return;
+	}
+	if (share.ocrSnapAt && share.ocrSnapAt === share.ocrPendingSnapAt) return;
+	const src = share.ocrSnap;
+	share.ocrBusy = true;
+	armOcrBusyWatch();
+	share.ocrPendingSnapAt = share.ocrSnapAt || performance.now();
+	if (typeof TextDetector === "function") {
+		postShareOcrBlob(src);
+		return;
+	}
+	postShareOcrBlob(src);
+}
+
+function startShareKeywordWatch() {
+	if (share.isGuest || !share.active || !streaming || !shareKeywordPauseAllowed() || !settings.shareKeywordPause) {
+		stopShareKeywordWatch();
+		updateShareKeywordStatus();
+		return;
+	}
+	if (share.keywordWatch) {
+		ensureShareStage();
+		ensureShareDelayRing();
+		syncShareAudioDelay();
+		updateShareKeywordStatus();
+		return;
+	}
+	share.keywordWatch = true;
+	share.ocrErr = false;
+	finishShareOcrBusy();
+	share.ocrMisses = 0;
+	share.ocrMissStreak = 0;
+	share.ocrHitStreak = 0;
+	share.lastHitKey = "";
+	share.ocrPendingSnapAt = 0;
+	share.ocrClearUntil = 0;
+	ensureShareStage();
+	ensureShareDelayRing();
+	syncShareAudioDelay();
+	updateShareKeywordStatus();
+	if (!share.ocrTimer)
+		share.ocrTimer = setInterval(maybeOfferShareOcrFromCap, 280);
+	maybeOfferShareOcrFromCap();
+}
+
+function stopShareKeywordWatch() {
+	share.keywordWatch = false;
+	share.ocrBusy = false;
+	share.ocrHay = "";
+	share.ocrSnapReady = false;
+	share.ocrMisses = 0;
+	share.lastHitAt = 0;
+	share.lastHitKey = "";
+	share.ocrClearUntil = 0;
+	share.ocrMissStreak = 0;
+	share.ocrHitStreak = 0;
+	finishShareOcrBusy();
+	if (share.ocrTimer) {
+		clearInterval(share.ocrTimer);
+		share.ocrTimer = 0;
+	}
+	if (share.paused) setSharePaused(false);
+	syncShareAudioDelay();
+	updateShareKeywordStatus();
 }
 
 function syncShareVpadGroupChecks() {
@@ -1011,9 +1772,14 @@ function filterPadByVpadKeys(pad, keys) {
 
 function updateShareBanners() {
 	const n = Number(share.viewers) || 0;
-	const hostOn = !share.isGuest && share.active && streaming && !share.bannerDismissed;
+	const hostOn = !share.isGuest && share.active && streaming && (!share.bannerDismissed || share.paused);
 	$("share-banner")?.classList.toggle("hidden", !hostOn);
-	if ($("share-banner-text")) $("share-banner-text").textContent = t("share.banner", { n });
+	$("share-banner")?.classList.toggle("is-paused", !!share.paused);
+	if ($("share-banner-text")) {
+		$("share-banner-text").textContent = share.paused
+			? t("share.paused")
+			: t("share.banner", { n });
+	}
 	if ($("share-viewers")) $("share-viewers").textContent = String(n);
 	if ($("share-link")) $("share-link").value = shareLinkUrl();
 	if ($("share-toggle")) $("share-toggle").textContent = share.active ? t("share.disable") : t("share.enable");
@@ -1050,6 +1816,8 @@ function shareBroadcastState(to) {
 		video: share.video !== false,
 		audio: share.audio !== false,
 		gamepad: !!share.gamepad,
+		paused: !!share.paused,
+		language: settings.language === "fr" ? "fr" : "en",
 		...shareVpadSkinPayload()
 	};
 	if (to) msg.to = to;
@@ -1073,11 +1841,28 @@ function shareBroadcastVpadSkin(delayMs) {
 
 function refreshGuestOverlay() {
 	if (!share.isGuest) return;
-	setStreamOverlay(share.hostStreaming ? "" : t("share.offline"));
+	const v = $("share-player");
+	const cover = $("share-pause-cover");
+	v?.closest(".stage")?.classList.toggle("share-paused", !!share.paused);
+	if (share.paused) {
+		setStreamOverlay(t("share.paused"), "paused");
+		v?.classList.add("hidden", "share-paused");
+		cover?.classList.remove("hidden");
+		return;
+	}
+	cover?.classList.add("hidden");
+	v?.classList.remove("share-paused");
+	if (share.video !== false) v?.classList.remove("hidden");
+	else v?.classList.add("hidden");
+	if (!share.hostStreaming) setStreamOverlay(t("share.offline"));
+	else setStreamOverlay("");
+	if (share.video !== false && v?.srcObject) v.play().catch(() => {});
 }
 
 function applyGuestShareStatus(msg) {
 	if (!msg) return;
+	const wasStreaming = share.hostStreaming;
+	const wasPaused = !!share.paused;
 	if (msg.streaming === false) share.hostStreaming = false;
 	if (msg.streaming === true) share.hostStreaming = true;
 	if (msg.video != null) share.video = msg.video !== false;
@@ -1089,10 +1874,20 @@ function applyGuestShareStatus(msg) {
 	if (msg.vpadLayout && typeof msg.vpadLayout === "object") share.vpadLayout = msg.vpadLayout;
 	if (msg.vpadOpacity != null) share.vpadOpacity = Number(msg.vpadOpacity);
 	if (msg.vpadKeys !== undefined) share.vpadKeys = normalizeVpadKeys(msg.vpadKeys);
+	if (msg.paused != null) share.paused = !!msg.paused;
+	if (msg.language) applyShareHostLanguage(msg.language);
 	if (!share.vpad) vpad = { buttons: 0, l2: 0, r2: 0, lx: 0, ly: 0, rx: 0, ry: 0 };
-	if (share.video === false) $("share-player")?.classList.add("hidden");
+	if (share.video === false && !share.paused) $("share-player")?.classList.add("hidden");
 	syncVpadUi();
 	refreshGuestOverlay();
+	if (share.hostStreaming && !share.paused && (!wasStreaming || wasPaused)) {
+		const v = $("share-player");
+		if (v?.srcObject) {
+			v.classList.remove("hidden", "share-paused");
+			v.play().catch(() => {});
+		}
+		shareSend({ type: "pli" });
+	}
 }
 
 function showShareError(key) {
@@ -1190,6 +1985,7 @@ async function saveShare(extra) {
 	if (share.active) {
 		shareConnectHost();
 		shareBroadcastState();
+		startShareKeywordWatch();
 	} else shareDisconnectHost();
 	return out;
 }
@@ -1217,6 +2013,46 @@ function shareForceKeyframes() {
 				try { sender.generateKeyFrame?.(); } catch {}
 		}
 	}
+}
+
+function ensureShareBlankTrack() {
+	if (share.blankTrack && share.blankTrack.readyState !== "ended") return share.blankTrack;
+	const c = document.createElement("canvas");
+	c.width = 64;
+	c.height = 36;
+	const ctx = c.getContext("2d", { alpha: false });
+	if (ctx) {
+		ctx.fillStyle = "#000";
+		ctx.fillRect(0, 0, c.width, c.height);
+	}
+	share.blankCanvas = c;
+	const stream = c.captureStream(5);
+	share.blankTrack = stream.getVideoTracks()[0] || null;
+	if (share.blankTrack) {
+		try { share.blankTrack.contentHint = "motion"; } catch {}
+		try { share.blankTrack.enabled = true; } catch {}
+		if (typeof share.blankTrack.requestFrame === "function")
+			try { share.blankTrack.requestFrame(); } catch {}
+	}
+	return share.blankTrack;
+}
+
+function shareOutgoingVideoTrack() {
+	if (share.paused) return ensureShareBlankTrack();
+	return share.media?.getVideoTracks()[0] || null;
+}
+
+function shareReplaceOutgoingVideo() {
+	const track = shareOutgoingVideoTrack();
+	if (!track) return;
+	for (const pc of share.pcs.values()) {
+		for (const sender of pc.getSenders()) {
+			if (!sender.track || sender.track.kind !== "video") continue;
+			if (sender.track === track) continue;
+			try { sender.replaceTrack(track); } catch {}
+		}
+	}
+	shareForceKeyframes();
 }
 
 function shareCaptureFps() {
@@ -1264,6 +2100,16 @@ function startShareCaptureLoop() {
 	share.keepAlive = true;
 	const tick = () => {
 		if (share.keepAlive) requestAnimationFrame(tick);
+		if (share.paused) {
+			maybeResumeSharePause();
+			if (performance.now() - (share.lastShareDraw || 0) > 200)
+				drawSharePausedCanvas();
+			return;
+		}
+		if (shareKeywordDelayOn()) {
+			flushShareDelayQueue();
+			return;
+		}
 		if (!share.capCtx || !share.capCanvas) return;
 		const track = share.media?.getVideoTracks()[0];
 		if (track && typeof track.requestFrame === "function" && performance.now() - share.lastShareDraw < 250)
@@ -1272,24 +2118,32 @@ function startShareCaptureLoop() {
 	requestAnimationFrame(tick);
 }
 
-function syncShareCanvasSize(w, h) {
-	const c = share.capCanvas;
-	if (!c) return false;
-	w = shareEvenDim(w);
-	h = shareEvenDim(h);
-	if (c.width === w && c.height === h) return false;
-	c.width = w;
-	c.height = h;
-	c.style.width = w + "px";
-	c.style.height = h + "px";
-	return true;
-}
-
 function pushShareFrame(frame) {
-	if (!share.active || share.isGuest || !share.pcs.size || !share.capCtx || !frame) return;
+	if (!share.active || share.isGuest || !share.pcs.size || !share.capCtx || !share.capCanvas) return;
+	if (!frame) return;
 	const d = videoFrameDest(frame);
 	if (!d.sw || !d.sh) return;
-	const resized = syncShareCanvasSize(d.sw, d.sh);
+	if (shareKeywordDelayOn() || share.keywordWatch) {
+		if (!ensureShareStage()) return;
+		try {
+			share.stageCtx.imageSmoothingEnabled = false;
+			share.stageCtx.drawImage(frame, d.sx, d.sy, d.sw, d.sh, 0, 0, share.stageCanvas.width, share.stageCanvas.height);
+		} catch { return; }
+		if (share.paused) {
+			maybeResumeSharePause();
+			drawSharePausedCanvas();
+			return;
+		}
+		if (shareKeywordDelayOn()) {
+			enqueueShareDelayFrame();
+			return;
+		}
+	}
+	if (share.paused) {
+		maybeResumeSharePause();
+		drawSharePausedCanvas();
+		return;
+	}
 	try {
 		share.capCtx.imageSmoothingEnabled = false;
 		share.capCtx.drawImage(frame, d.sx, d.sy, d.sw, d.sh, 0, 0, share.capCanvas.width, share.capCanvas.height);
@@ -1297,18 +2151,56 @@ function pushShareFrame(frame) {
 		const track = share.media?.getVideoTracks()[0];
 		if (track && typeof track.requestFrame === "function") track.requestFrame();
 	} catch {}
-	if (resized) {
-		for (const pc of share.pcs.values()) configureShareSender(pc);
+}
+
+function ensureShareMedia() {
+	if (!share.media && typeof HTMLCanvasElement !== "undefined" && HTMLCanvasElement.prototype.captureStream) {
+		const c = document.createElement("canvas");
+		const [pw, ph] = streamPresetSize();
+		const w = shareEvenDim(pw || canvas.width || 1920);
+		const h = shareEvenDim(ph || canvas.height || 1080);
+		c.width = w;
+		c.height = h;
+		c.className = "share-cap";
+		c.setAttribute("aria-hidden", "true");
+		c.style.cssText = `position:fixed;left:-10000px;top:0;width:${w}px;height:${h}px;opacity:0;pointer-events:none;`;
+		document.body.appendChild(c);
+		share.capCanvas = c;
+		share.capCtx = c.getContext("2d", { alpha: false });
+		if (share.capCtx) {
+			share.capCtx.imageSmoothingEnabled = false;
+			share.capCtx.fillStyle = "#000";
+			share.capCtx.fillRect(0, 0, w, h);
+		}
+		share.media = c.captureStream(shareCaptureFps());
+		const vt = share.media.getVideoTracks()[0];
+		if (vt) {
+			try { vt.contentHint = "motion"; } catch {}
+			try { vt.enabled = true; } catch {}
+			if (typeof vt.requestFrame === "function")
+				try { vt.requestFrame(); } catch {}
+		}
 	}
+	startShareCaptureLoop();
+	attachShareAudio();
+	startShareKeyframeLoop();
+	return share.media;
 }
 
 function stopShareMedia() {
 	share.keepAlive = false;
+	share.capRefresh = false;
 	if (share.keyTimer) {
 		clearInterval(share.keyTimer);
 		share.keyTimer = null;
 	}
 	share.lastShareDraw = 0;
+	freeShareDelayRing();
+	if (share.audioDelay) {
+		try { audio.gain?.disconnect(share.audioDelay); } catch {}
+		try { share.audioDelay.disconnect(); } catch {}
+		share.audioDelay = null;
+	}
 	if (share.media) {
 		for (const t of share.media.getTracks()) {
 			try { t.stop(); } catch {}
@@ -1321,45 +2213,31 @@ function stopShareMedia() {
 		share.capCtx = null;
 	}
 	share.audioDest = null;
+	if (share.blankTrack) {
+		try { share.blankTrack.stop(); } catch {}
+		share.blankTrack = null;
+		share.blankCanvas = null;
+	}
+	if (share.ocrPort) {
+		try { share.ocrPort.terminate(); } catch {}
+		share.ocrPort = null;
+	}
+	if (share.ocrTess && typeof share.ocrTess.terminate === "function") {
+		try { share.ocrTess.terminate(); } catch {}
+		share.ocrTess = null;
+		share.ocrTessP = null;
+	}
+	finishShareOcrBusy();
 }
 
 function attachShareAudio() {
 	if (!audio.ctx || share.audioDest) return;
 	share.audioDest = audio.ctx.createMediaStreamDestination();
-	if (audio.gain) {
-		try { audio.gain.connect(share.audioDest); } catch {}
-	}
 	const track = share.audioDest.stream.getAudioTracks()[0];
 	if (share.media && track && !share.media.getAudioTracks().length)
 		share.media.addTrack(track);
-}
-
-function ensureShareMedia() {
-	if (!share.media && typeof HTMLCanvasElement !== "undefined" && HTMLCanvasElement.prototype.captureStream) {
-		const c = document.createElement("canvas");
-		const [pw, ph] = streamPresetSize();
-		const w = shareEvenDim(canvas.width || pw || 1920);
-		const h = shareEvenDim(canvas.height || ph || 1080);
-		c.width = w;
-		c.height = h;
-		c.className = "share-cap";
-		c.setAttribute("aria-hidden", "true");
-		c.style.cssText = `position:fixed;left:-10000px;top:0;width:${w}px;height:${h}px;opacity:0;pointer-events:none;`;
-		document.body.appendChild(c);
-		share.capCanvas = c;
-		share.capCtx = c.getContext("2d", { alpha: false });
-		if (share.capCtx) share.capCtx.imageSmoothingEnabled = false;
-		share.media = c.captureStream(shareCaptureFps());
-		const vt = share.media.getVideoTracks()[0];
-		if (vt) {
-			try { vt.contentHint = "motion"; } catch {}
-			try { vt.enabled = true; } catch {}
-		}
-	}
-	startShareCaptureLoop();
-	attachShareAudio();
-	startShareKeyframeLoop();
-	return share.media;
+	syncShareAudioDelay();
+	applySharePauseMedia();
 }
 
 async function configureShareSender(pc) {
@@ -1387,7 +2265,18 @@ async function shareSyncPeerTracks() {
 	if (!stream) return;
 	for (const [id, pc] of share.pcs) {
 		for (const track of stream.getTracks()) {
-			if (track.kind === "video" && !share.video) continue;
+			if (track.kind === "video") {
+				if (!share.video) continue;
+				const out = shareOutgoingVideoTrack();
+				if (!out) continue;
+				const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+				try {
+					if (sender) {
+						if (sender.track !== out) await sender.replaceTrack(out);
+					} else pc.addTrack(out, stream);
+				} catch {}
+				continue;
+			}
 			if (track.kind === "audio" && !share.audio) continue;
 			const sender = pc.getSenders().find((s) => s.track && s.track.kind === track.kind);
 			try {
@@ -1418,7 +2307,12 @@ async function shareStartPeer(guestId) {
 	const stream = ensureShareMedia();
 	if (stream) {
 		for (const track of stream.getTracks()) {
-			if (track.kind === "video" && !share.video) continue;
+			if (track.kind === "video") {
+				if (!share.video) continue;
+				const out = shareOutgoingVideoTrack();
+				if (out) pc.addTrack(out, stream);
+				continue;
+			}
 			if (track.kind === "audio" && !share.audio) continue;
 			pc.addTrack(track, stream);
 		}
@@ -1448,12 +2342,14 @@ function shareDisconnectHost() {
 	share.pcs.clear();
 	share.iceWait.clear();
 	share.guestPads.clear();
+	share.pendingGuests.clear();
 	share.viewers = 0;
 	if (share.ws) {
 		try { share.ws.close(); } catch {}
 		share.ws = null;
 	}
 	if (!share.active) stopShareMedia();
+	stopShareKeywordWatch();
 	updateShareBanners();
 }
 
@@ -1473,11 +2369,13 @@ function shareConnectHost() {
 		if (msg.type === "guest-join") {
 			share.viewers = msg.viewers || 0;
 			updateShareBanners();
-			await shareStartPeer(msg.id);
+			if (streaming) await shareStartPeer(msg.id);
+			else share.pendingGuests.add(msg.id);
 			shareBroadcastState(msg.id);
 		}
 		if (msg.type === "guest-leave") {
 			share.viewers = msg.viewers || 0;
+			share.pendingGuests.delete(msg.id);
 			const pc = share.pcs.get(msg.id);
 			if (pc) { try { pc.close(); } catch {} share.pcs.delete(msg.id); }
 			share.iceWait.delete(msg.id);
@@ -1517,11 +2415,18 @@ function shareOnStreaming(on) {
 	updateShareBanners();
 	if (!share.active || share.isGuest) return;
 	shareBroadcastState();
-	if (on) shareForceKeyframes();
+	if (on) {
+		if (share.paused) setSharePaused(false);
+		const waiting = [...share.pendingGuests];
+		share.pendingGuests.clear();
+		for (const id of waiting) shareStartPeer(id);
+		if (share.pcs.size) shareForceKeyframes();
+		startShareKeywordWatch();
+	} else stopShareKeywordWatch();
 }
 
 function mergeGuestPad(buttons, l2, r2, lx, ly, rx, ry) {
-	if (!share.active || share.isGuest || (!share.vpad && !share.gamepad))
+	if (!share.active || share.isGuest || share.paused || (!share.vpad && !share.gamepad))
 		return { buttons, l2, r2, lx, ly, rx, ry };
 	for (const p of share.guestPads.values()) {
 		const src = filterPadByVpadKeys(p, share.vpadKeys);
@@ -1594,6 +2499,11 @@ async function bootGuest(token) {
 	share.gamepad = !!body.gamepad;
 	share.vpadKeys = normalizeVpadKeys(body.vpadKeys);
 	share.viewers = Number(body.viewers) || 0;
+	if (body.language) {
+		share.hostLang = shareLangCode(body.language);
+		await loadI18n(share.hostLang);
+		applyI18n();
+	}
 	share.hostStreaming = false;
 	$("share-player")?.classList.toggle("hidden", !share.video);
 	await showView("stream");
@@ -1606,7 +2516,7 @@ async function bootGuest(token) {
 	let remoteReady = false;
 	const v = $("share-player");
 	const playShareVideo = () => {
-		if (!v || !v.srcObject) return;
+		if (!v || !v.srcObject || share.paused) return;
 		const run = () => v.play().catch(() => {});
 		run();
 		if (v.paused) {
@@ -1620,6 +2530,7 @@ async function bootGuest(token) {
 		try { v.disablePictureInPicture = true; } catch {}
 		["stalled", "waiting", "suspend", "pause", "emptied"].forEach((ev) => {
 			v.addEventListener(ev, () => {
+				if (share.paused) return;
 				if (v.srcObject && share.hostStreaming) playShareVideo();
 			});
 		});
@@ -1628,7 +2539,7 @@ async function bootGuest(token) {
 		if (!v) return;
 		const stream = ev.streams[0] || new MediaStream([ev.track]);
 		if (v.srcObject !== stream) v.srcObject = stream;
-		v.classList.remove("hidden");
+		if (!share.paused) v.classList.remove("hidden");
 		v.playsInline = true;
 		v.autoplay = true;
 		playShareVideo();
@@ -1670,11 +2581,14 @@ async function bootGuest(token) {
 		}
 		if (msg.type === "status" || msg.type === "rights")
 			applyGuestShareStatus(msg);
-		if (msg.type === "hello" && msg.rights)
-			applyGuestShareStatus(msg.rights);
+		if (msg.type === "hello")
+			applyGuestShareStatus({
+				...(msg.rights || {}),
+				language: msg.language || (msg.rights && msg.rights.language)
+			});
 	};
 	setInterval(() => {
-		if (!share.isGuest || (!share.vpad && !share.gamepad)) return;
+		if (!share.isGuest || share.paused || (!share.vpad && !share.gamepad)) return;
 		shareSend(guestPadSnapshot());
 	}, 16);
 	let lastFrameCount = -1;
@@ -1692,7 +2606,7 @@ async function bootGuest(token) {
 	};
 	watchFrames();
 	setInterval(() => {
-		if (!share.isGuest || !share.hostStreaming || !v?.srcObject) {
+		if (!share.isGuest || share.paused || !share.hostStreaming || !v?.srcObject) {
 			lastFrameCount = -1;
 			stuckHits = 0;
 			return;
@@ -1742,9 +2656,11 @@ function applyCloudMeta(body) {
 	if (body.allowRegister != null) cloud.allowRegister = body.allowRegister !== false;
 	if (body.maxHosts != null) cloud.maxHosts = Number(body.maxHosts) || 32;
 	if (body.discoveryEnabled != null) cloud.discoveryEnabled = body.discoveryEnabled !== false;
+	if (body.shareKeywordPause != null) cloud.shareKeywordPause = body.shareKeywordPause === true;
 	if (body.user !== undefined) cloud.user = body.user || null;
 	if (typeof body.ipv4 === "string") cloud.ipv4 = body.ipv4;
 	applyDiscoveryUi();
+	syncShareKeywordUi();
 }
 
 async function initCloud() {
@@ -2543,9 +3459,7 @@ function ensureAudioOut() {
 			if (!hadAudio && share.audioDest) shareSyncPeerTracks();
 		}
 	}
-	if (audio.gain && share.audioDest) {
-		try { audio.gain.connect(share.audioDest); } catch {}
-	}
+	if (audio.gain && share.audioDest) syncShareAudioDelay();
 	if (audio.workletTried) return;
 	audio.workletTried = true;
 	const startWorklet = async () => {
@@ -3963,11 +4877,12 @@ function setStreamOverlay(text, kind) {
 	if (!text) {
 		el.classList.add("hidden");
 		el.textContent = "";
-		el.classList.remove("error");
+		el.classList.remove("error", "paused");
 		return;
 	}
 	el.textContent = text;
 	el.classList.toggle("error", kind === "error");
+	el.classList.toggle("paused", kind === "paused");
 	el.classList.remove("hidden");
 }
 
@@ -4749,6 +5664,11 @@ function bindUi() {
 			if (id === "share-opt-vpad" || id === "share-opt-gamepad") syncShareVpadKeysPanel();
 			if (share.active) saveShare();
 		});
+	});
+	$("share-opt-keyword-pause")?.addEventListener("change", persistShareKeywordSettings);
+	$("share-keywords")?.addEventListener("change", persistShareKeywordSettings);
+	$("share-keywords")?.addEventListener("input", () => {
+		if ($("share-keywords")) settings.shareKeywords = $("share-keywords").value;
 	});
 	$("account-close").onclick = closeAccountSettings;
 	$("account-modal").addEventListener("click", (e) => {
