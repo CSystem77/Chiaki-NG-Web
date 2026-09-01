@@ -483,6 +483,18 @@ img { display: block; }
 	height: 50px;
 	filter: invert(1);
 }
+.fab-help {
+	left: 20px;
+	right: auto;
+	bottom: 20px;
+	font-size: 42px;
+	font-weight: 700;
+	color: #fff;
+	line-height: 1;
+}
+html.electron-app .fab-help {
+	bottom: 120px;
+}
 .version {
 	position: absolute;
 	right: 20px;
@@ -878,10 +890,39 @@ img { display: block; }
 	flex-wrap: wrap;
 	min-width: 0;
 }
+.proxy-row select {
+	width: auto;
+	min-width: 11rem;
+	flex: 0 0 auto;
+}
 .proxy-row .plain {
 	flex: 1;
 	min-width: 0;
-	word-break: break-all;
+}
+.proxy-dl-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+.proxy-dl-row a.ghost,
+.proxy-dl-row a.proxy-dl-win {
+	text-decoration: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+.proxy-dl-row a.proxy-dl-win {
+	background: var(--accent);
+	color: #fff;
+	border: 0;
+	border-radius: 4px;
+	padding: 10px 18px;
+	font-weight: 600;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
+}
+.proxy-dl-row a.proxy-dl-win:hover {
+	background: #5c9cff;
 }
 .keys-toolbar {
 	display: flex;
@@ -976,6 +1017,57 @@ kbd {
 	display: flex;
 	justify-content: space-between;
 	gap: 12px;
+}
+.console-admin-list li {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 10px;
+}
+.console-admin-list .console-admin-empty {
+	color: var(--muted);
+	justify-content: flex-start;
+}
+.console-admin-main {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+.console-admin-meta {
+	min-width: 0;
+}
+.console-admin-meta div {
+	color: var(--muted);
+	font-size: 13px;
+	margin-top: 2px;
+}
+.console-admin-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+.console-admin-actions [data-act="delete"] {
+	color: #ef9a9a;
+}
+.console-admin-psn {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+.console-admin-psn label {
+	color: var(--muted);
+	font-size: 13px;
+}
+.console-admin-psn input {
+	flex: 1;
+	min-width: 12rem;
+	background: #212121;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	padding: 8px 10px;
+	color: inherit;
 }
 
 .stream {
@@ -1633,10 +1725,16 @@ body.share-guest #btn-stream-share,
 body.share-guest #btn-vpad,
 body.share-guest #btn-discover,
 body.share-guest #app-version { display: none !important; }
+html:not(.electron-app) #btn-discover { display: none !important; }
 html.electron-app #btn-stream-share,
 html.electron-app #btn-share,
 html.electron-app #share-banner,
-html.electron-app #share-modal { display: none !important; }
+html.electron-app #share-modal,
+html.electron-app #proxy-dl-block,
+html.electron-app #proxy-home-hint,
+html.electron-app #home-proxy-modal,
+html.electron-app #btn-home-proxy-disconnect,
+html.electron-app #add-home-hint { display: none !important; }
 .share-stream-state.is-offline { color: #ffb74d; }
 
 .modal {
@@ -1653,7 +1751,9 @@ html.electron-app #share-modal { display: none !important; }
 	padding: max(12px, env(safe-area-inset-top, 12px)) 12px max(12px, env(safe-area-inset-bottom, 12px));
 }
 #confirm-modal,
-#delete-account-modal { z-index: 30; }
+#delete-account-modal,
+#help-modal { z-index: 30; }
+#home-proxy-modal { z-index: 50; }
 .modal-card {
 	width: min(460px, 100%);
 	margin: auto;
@@ -1664,6 +1764,43 @@ html.electron-app #share-modal { display: none !important; }
 	padding: 24px 28px;
 	border-radius: 12px;
 	box-shadow: 0 11px 15px -7px rgba(0,0,0,.2), 0 24px 38px 3px rgba(0,0,0,.14);
+}
+.help-card {
+	width: min(1120px, 100%);
+	height: min(90dvh, 920px);
+	max-height: calc(100dvh - 24px);
+	padding: 0;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+.help-modal-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 12px 16px;
+	flex: 0 0 auto;
+}
+.help-modal-bar h3 { margin: 0; }
+.help-close {
+	border: 0;
+	background: #fff;
+	color: #000;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.2;
+	padding: 8px 16px;
+	border-radius: 4px;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+.help-close:hover { background: #e8e8e8; }
+.help-card iframe {
+	flex: 1 1 auto;
+	width: 100%;
+	border: 0;
+	background: #1e2129;
 }
 .add-card {
 	padding: 20px 20px 0;

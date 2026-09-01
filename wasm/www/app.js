@@ -100,6 +100,26 @@ function uiLanguage() {
 	return settings.language === "fr" ? "fr" : "en";
 }
 
+function helpDocsUrl() {
+	const lang = uiLanguage() === "en" ? "en" : "fr";
+	return `doc/${lang}/index.html`;
+}
+
+function openHelpModal() {
+	const modal = $("help-modal");
+	const frame = $("help-frame");
+	if (!modal || !frame) return;
+	frame.src = helpDocsUrl();
+	modal.classList.remove("hidden");
+}
+
+function closeHelpModal() {
+	const modal = $("help-modal");
+	const frame = $("help-frame");
+	if (modal) modal.classList.add("hidden");
+	if (frame) frame.src = "about:blank";
+}
+
 async function applyShareHostLanguage(raw) {
 	const code = shareLangCode(raw);
 	if (share.hostLang === code) return;
@@ -146,8 +166,11 @@ function applyI18n() {
 	});
 	renderKeymap();
 	renderHosts();
+	renderSavedList();
 	applyVpadOpacity();
 	refreshProxyStatus();
+	syncHomeProxyUi();
+	renderProxyDownloads();
 	syncFullscreenButton();
 	syncStopButton();
 	syncDocumentTitle();
@@ -236,6 +259,7 @@ let lastPadSent = "";
 let discovered = [];
 let discoveredSeenAt = new Map();
 let hostsRenderTimer = 0;
+let lastConsoleAdminSig = "";
 let discoveryRestartTimer = 0;
 let currentView = "welcome";
 let streamTitleName = "";
@@ -244,8 +268,11 @@ let svgIcons = { ps4: "", ps5: "" };
 let settings = { ...defaultSettings };
 let proxyUrl = "";
 let proxyState = "";
-let cloud = { authEnabled: false, allowRegister: true, maxHosts: 32, discoveryEnabled: true, shareKeywordPause: false, user: null, ipv4: "" };
+let cloud = { authEnabled: false, allowRegister: true, maxHosts: 32, discoveryEnabled: true, shareKeywordPause: false, user: null, ipv4: "", homeProxy: false, homeProxyPending: false, homeProxyName: "" };
 let cloudPushTimer = 0;
+let stateGen = 0;
+let homeProxyWatch = 0;
+let proxyBuilds = null;
 let authUnlocked = null;
 let settingsReturnView = "welcome";
 let vpadOn = false;
@@ -332,6 +359,7 @@ function loadSettings() {
 	syncMouseSensLabel();
 	applyVpadOpacity();
 	applyDiscoveryUi();
+	syncProxyUi();
 }
 
 function saveSettings() {
@@ -367,6 +395,7 @@ function saveSettings() {
 		mousemap: { ...defaultMousemap, ...(settings.mousemap || {}) }
 	};
 	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+	stateGen++;
 	scheduleCloudPush();
 }
 
@@ -645,6 +674,7 @@ function savedHosts() {
 	catch { return []; }
 }
 function persistHosts(list) {
+	stateGen++;
 	localStorage.setItem(HOSTS_KEY, JSON.stringify(list.slice(0, cloud.maxHosts || 32)));
 	renderSavedList();
 	renderHosts();
@@ -656,8 +686,11 @@ function hiddenSet() {
 	catch { return new Set(); }
 }
 function persistHidden(set) {
+	stateGen++;
 	localStorage.setItem(HIDDEN_KEY, JSON.stringify([...set]));
 	scheduleCloudPush();
+	renderHosts();
+	renderSavedList();
 }
 function revealedAddrSet() {
 	try { return new Set(JSON.parse(localStorage.getItem(REVEAL_ADDR_KEY) || "[]")); }
@@ -731,13 +764,16 @@ function snapshotState() {
 
 async function pushCloudState() {
 	if (!cloud.authEnabled) return true;
+	const gen = stateGen;
 	const { ok, body } = await cloudRequest("/api/state", {
 		method: "PUT",
 		body: JSON.stringify(snapshotState())
 	});
-	if (ok && body && Array.isArray(body.hosts))
+	if (!ok) return false;
+	if (gen !== stateGen) return true;
+	if (body && Array.isArray(body.hosts))
 		localStorage.setItem(HOSTS_KEY, JSON.stringify(body.hosts));
-	return ok;
+	return true;
 }
 
 function applyRemoteState(data) {
@@ -859,6 +895,10 @@ function unlockAuth() {
 
 function isElectronApp() {
 	return /\bElectron\b/i.test(navigator.userAgent || "");
+}
+
+function homeProxyUiEnabled() {
+	return !isElectronApp();
 }
 
 const SHARE_ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
@@ -2652,6 +2692,8 @@ async function pullCloudState() {
 
 function applyCloudMeta(body) {
 	if (!body || typeof body !== "object") return;
+	const wasHome = cloud.homeProxy;
+	const wasPending = cloud.homeProxyPending;
 	if (body.authEnabled != null) cloud.authEnabled = !!body.authEnabled;
 	if (body.allowRegister != null) cloud.allowRegister = body.allowRegister !== false;
 	if (body.maxHosts != null) cloud.maxHosts = Number(body.maxHosts) || 32;
@@ -2659,8 +2701,123 @@ function applyCloudMeta(body) {
 	if (body.shareKeywordPause != null) cloud.shareKeywordPause = body.shareKeywordPause === true;
 	if (body.user !== undefined) cloud.user = body.user || null;
 	if (typeof body.ipv4 === "string") cloud.ipv4 = body.ipv4;
+	if (body.homeProxy != null) cloud.homeProxy = !!body.homeProxy;
+	if (body.homeProxyPending != null) cloud.homeProxyPending = !!body.homeProxyPending;
+	if (typeof body.homeProxyName === "string") cloud.homeProxyName = body.homeProxyName;
+	if (cloud.homeProxy) cloud.discoveryEnabled = true;
+	if (homeProxyUiEnabled() && !wasHome && cloud.homeProxy && proxyState === "connected" && !proxyIsCustom()) {
+		location.reload();
+		return;
+	}
+	syncHomeProxyUi();
 	applyDiscoveryUi();
 	syncShareKeywordUi();
+	if (!wasHome && cloud.homeProxy) startDiscovery();
+	if (wasPending && !cloud.homeProxyPending && !cloud.homeProxy)
+		ensureWasmRuntime().catch(() => {});
+}
+
+function renderProxyDownloads() {
+	const box = $("proxy-dl-btns");
+	const block = $("proxy-dl-block");
+	if (!box) return;
+	if (!homeProxyUiEnabled()) {
+		block?.classList.add("hidden");
+		return;
+	}
+	box.innerHTML = "";
+	for (const it of [
+		{ id: "windows", className: "proxy-dl-win", label: "config.proxyDlWin", fallback: "/downloads/chiaki-proxy-windows.exe" },
+		{ id: "linux", className: "proxy-dl-win", label: "config.proxyDlLinux", fallback: "/downloads/chiaki-proxy-linux" },
+		{ id: "macos", className: "ghost", label: "config.proxyDlMac", fallback: null }
+	]) {
+		const href = (proxyBuilds && proxyBuilds[it.id]) || it.fallback;
+		if (!href) continue;
+		const a = document.createElement("a");
+		a.className = it.className;
+		a.id = "proxy-dl-" + it.id;
+		a.textContent = t(it.label);
+		a.href = href;
+		a.setAttribute("download", "");
+		box.appendChild(a);
+	}
+	block?.classList.remove("hidden");
+}
+
+async function loadProxyDownloads() {
+	try {
+		const { ok, body } = await cloudRequest("/api/proxy-builds");
+		if (ok && body && typeof body === "object") proxyBuilds = body;
+	} catch {}
+	renderProxyDownloads();
+}
+
+function syncHomeProxyUi() {
+	if (!homeProxyUiEnabled()) {
+		$("proxy-home-hint")?.classList.add("hidden");
+		$("btn-home-proxy-disconnect")?.classList.add("hidden");
+		$("home-proxy-modal")?.classList.add("hidden");
+		$("add-home-hint")?.classList.add("hidden");
+		refreshProxyStatus();
+		return;
+	}
+	const hint = $("proxy-home-hint");
+	if (hint) hint.classList.toggle("hidden", !cloud.homeProxy);
+	$("btn-home-proxy-disconnect")?.classList.toggle("hidden", !cloud.homeProxy);
+	const cfgHint = $("config-hint");
+	if (cfgHint) cfgHint.setAttribute("data-i18n", cloud.homeProxy ? "config.homeProxyOn" : "config.hint");
+	if (cfgHint && typeof t === "function") cfgHint.textContent = t(cloud.homeProxy ? "config.homeProxyOn" : "config.hint");
+	const addHost = $("add-host");
+	if (addHost) {
+		const ph = cloud.homeProxy ? "add.addressPhHome" : "add.addressPh";
+		addHost.setAttribute("data-i18n-placeholder", ph);
+		addHost.placeholder = t(ph);
+	}
+	const addHint = $("add-home-hint");
+	if (addHint) {
+		if (cloud.homeProxy) {
+			addHint.textContent = t("add.homeHint");
+			addHint.classList.remove("hidden");
+		} else if (cloud.homeProxyPending) {
+			addHint.textContent = t("add.homeHintPending");
+			addHint.classList.remove("hidden");
+		} else {
+			addHint.textContent = "";
+			addHint.classList.add("hidden");
+		}
+	}
+	refreshProxyStatus();
+	syncHomeProxyModal();
+}
+
+function syncHomeProxyModal() {
+	const modal = $("home-proxy-modal");
+	if (!modal) return;
+	const show = !!(homeProxyUiEnabled() && cloud.homeProxyPending && !cloud.homeProxy);
+	const text = $("home-proxy-modal-text");
+	if (text) text.textContent = t("config.proxyApproveText", { name: cloud.homeProxyName || "PC" });
+	modal.classList.toggle("hidden", !show);
+}
+
+async function approveHomeProxy() {
+	const { ok, body } = await cloudRequest("/api/proxy/approve", { method: "POST", body: "{}" });
+	if (!ok) return;
+	applyCloudMeta(body);
+	location.reload();
+}
+
+async function disconnectHomeProxy() {
+	const { ok, body } = await cloudRequest("/api/proxy/disconnect", { method: "POST", body: "{}" });
+	if (ok) applyCloudMeta(body);
+	$("home-proxy-modal")?.classList.add("hidden");
+	location.reload();
+}
+
+async function rejectHomeProxy() {
+	const { ok, body } = await cloudRequest("/api/proxy/reject", { method: "POST", body: "{}" });
+	if (ok) applyCloudMeta(body);
+	$("home-proxy-modal")?.classList.add("hidden");
+	ensureWasmRuntime().catch(() => {});
 }
 
 async function initCloud() {
@@ -2671,6 +2828,21 @@ async function initCloud() {
 	await waitForAuthIfNeeded();
 	if (cloud.authEnabled) {
 		try { await pullCloudState(); } catch {}
+	}
+	if (homeProxyUiEnabled()) {
+		try {
+			const { ok, body } = await cloudRequest("/api/meta");
+			if (ok) applyCloudMeta(body);
+		} catch {}
+		if (!homeProxyWatch) {
+			homeProxyWatch = setInterval(async () => {
+				try {
+					const { ok, body } = await cloudRequest("/api/meta");
+					if (ok) applyCloudMeta(body);
+				} catch {}
+			}, 1500);
+		}
+		loadProxyDownloads();
 	}
 }
 
@@ -2713,36 +2885,68 @@ function effectiveProxyUrl() {
 	return custom || defaultProxyUrl();
 }
 
+function proxyIsCustom() {
+	return !!(settings.proxyUrl || "").trim();
+}
+
+function syncProxyUi() {
+	const custom = proxyIsCustom();
+	if ($("s-proxy-mode")) $("s-proxy-mode").value = custom ? "custom" : "default";
+	if ($("s-proxy-url")) $("s-proxy-url").value = custom ? settings.proxyUrl.trim() : "";
+	$("proxy-custom-row")?.classList.toggle("hidden", !custom);
+	refreshProxyStatus();
+}
+
 function refreshProxyStatus() {
 	const el = $("proxy-status");
 	if (!el) return;
-	const url = proxyUrl || effectiveProxyUrl();
-	if (proxyState === "failed") el.textContent = t("config.initFailed");
-	else if (url && proxyState === "connected") el.textContent = url + " (" + t("config.connected") + ")";
-	else if (url && proxyState === "offline") el.textContent = url + " (" + t("config.offline") + ")";
-	else if (url) el.textContent = url;
+	if (homeProxyUiEnabled() && cloud.homeProxy) el.textContent = t("config.homeProxyConnected");
+	else if (homeProxyUiEnabled() && cloud.homeProxyPending) el.textContent = t("config.homeProxyPending");
+	else if (proxyState === "failed") el.textContent = t("config.initFailed");
+	else if (proxyState === "connected") el.textContent = t("config.connected");
+	else if (proxyState === "offline") el.textContent = t("config.offline");
 	else el.textContent = "—";
 }
 
-function openProxyEditor() {
-	$("proxy-url-input").value = proxyUrl || effectiveProxyUrl();
-	$("proxy-modal").classList.remove("hidden");
-	$("proxy-url-input").focus();
-	$("proxy-url-input").select();
+function commitProxyUrl(next) {
+	const def = defaultProxyUrl();
+	const stored = !next || next === def ? "" : next;
+	if ((settings.proxyUrl || "") === stored) {
+		syncProxyUi();
+		return;
+	}
+	settings.proxyUrl = stored;
+	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+	pushCloudState().finally(() => location.reload());
 }
 
-function applyProxyFromModal() {
-	const raw = ($("proxy-url-input").value || "").trim();
-	const next = raw || defaultProxyUrl();
-	if (!/^wss?:\/\//i.test(next)) {
+function applyProxyModeFromForm() {
+	const mode = $("s-proxy-mode")?.value === "custom" ? "custom" : "default";
+	if (mode === "default") {
+		$("proxy-custom-row")?.classList.add("hidden");
+		commitProxyUrl("");
+		return;
+	}
+	$("proxy-custom-row")?.classList.remove("hidden");
+	refreshProxyStatus();
+	$("s-proxy-url")?.focus();
+}
+
+function applyCustomProxyFromForm() {
+	const raw = ($("s-proxy-url")?.value || "").trim();
+	if (!raw) {
+		commitProxyUrl("");
+		return;
+	}
+	if (/^(\d{1,3}\.){3}\d{1,3}$/.test(raw)) {
+		log(t("config.proxyIpNotUrl"), 0);
+		return;
+	}
+	if (!/^wss?:\/\//i.test(raw)) {
 		log(t("config.proxyBad"), 0);
 		return;
 	}
-	const def = defaultProxyUrl();
-	settings.proxyUrl = next === def ? "" : next;
-	localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-	$("proxy-modal").classList.add("hidden");
-	pushCloudState().finally(() => location.reload());
+	commitProxyUrl(raw);
 }
 
 function waitFor(pred, timeoutMs) {
@@ -4256,9 +4460,11 @@ function normalizeState(state) {
 }
 
 function hostKey(h) {
+	const addr = normAddr(h && (h.addr || h.host));
+	if (h && h.manual && addr) return "addr:" + addr;
 	const id = normHostId(h && h.id);
 	if (id) return "id:" + id;
-	return "addr:" + normAddr(h && (h.addr || h.host));
+	return "addr:" + addr;
 }
 
 function hostsMatch(a, b) {
@@ -4266,6 +4472,11 @@ function hostsMatch(a, b) {
 	const ida = normHostId(a.id);
 	const idb = normHostId(b.id);
 	if (ida && idb && ida === idb) return true;
+	return hostsMatchAddr(a, b);
+}
+
+function hostsMatchAddr(a, b) {
+	if (!a || !b) return false;
 	const aa = normAddr(a.addr || a.host);
 	const ba = normAddr(b.addr || b.host);
 	return !!(aa && ba && aa === ba);
@@ -4289,6 +4500,7 @@ function scheduleRenderHosts() {
 	hostsRenderTimer = requestAnimationFrame(() => {
 		hostsRenderTimer = 0;
 		renderHosts();
+		renderSavedList();
 	});
 }
 
@@ -4302,12 +4514,12 @@ function restartDiscovery() {
 }
 
 function findDiscoveryRow(addr, id) {
-	const mac = normHostId(id);
 	const ip = normAddr(addr);
-	return discovered.find((d) => hostsMatch(d, { addr, id }))
-		|| discovered.find((d) => ip && normAddr(d.addr) === ip)
-		|| (mac && discovered.find((d) => normHostId(d.id) === mac))
-		|| null;
+	if (ip) {
+		const byAddr = discovered.find((d) => normAddr(d.addr) === ip);
+		if (byAddr) return byAddr;
+	}
+	return discovered.find((d) => hostsMatch(d, { addr, id })) || null;
 }
 
 function applyDiscoveryRow(target, h) {
@@ -4340,16 +4552,18 @@ function mergedHosts() {
 			registered: !!(h.registKey && h.morning),
 			registKey: h.registKey || "",
 			morning: h.morning || "",
+			psnId: h.psnId || "",
 			manual: true
 		};
-		byKey.set(hostKey(row), row);
+		byKey.set("saved:" + (normAddr(h.host) || h.host), row);
 	}
 	for (const h of discovered) {
 		if (isHidden(h.addr)) continue;
-		let prev = byKey.get(hostKey(h));
+		const ip = normAddr(h.addr);
+		let prev = ip ? byKey.get("saved:" + ip) : null;
 		if (!prev) {
 			for (const row of byKey.values()) {
-				if (hostsMatch(row, h)) {
+				if (row.manual && hostsMatchAddr(row, h)) {
 					prev = row;
 					break;
 				}
@@ -4359,7 +4573,7 @@ function mergedHosts() {
 			applyDiscoveryRow(prev, h);
 			continue;
 		}
-		if (!discoveryOn) continue;
+		if (!discoveryOn && !cloud.homeProxy) continue;
 		byKey.set(hostKey(h), {
 			addr: h.addr,
 			name: h.name || h.addr,
@@ -4507,13 +4721,14 @@ function renderHosts() {
 					if (!ok) return;
 					const set = hiddenSet();
 					set.add(h.addr);
+					if (normAddr(h.addr)) set.add(normAddr(h.addr));
 					persistHidden(set);
 					renderHosts();
 					return;
 				}
 				const ok = await askConfirm(t("confirm.deleteTitle"), t("confirm.deleteText"));
 				if (!ok) return;
-				persistHosts(savedHosts().filter((x) => x.host !== h.addr));
+				persistHosts(savedHosts().filter((x) => x.host !== h.addr && normAddr(x.host) !== normAddr(h.addr)));
 			};
 		}
 		if (h.registered && h.registKey && state !== "ready") {
@@ -4534,15 +4749,159 @@ function renderHosts() {
 	}
 }
 
+function savedListEditingPsn() {
+	const el = $("saved-list");
+	const active = document.activeElement;
+	return !!(el && active && el.contains(active) && active.matches("[data-act='psn']"));
+}
+
+function consoleAdminSignature(rows) {
+	return uiLanguage() + "\n" + rows.map((r) =>
+		[r.addr, r.name, Number(!!r.ps5), Number(!!r.saved), Number(!!r.hidden), r.psnId || "", Number(!!r.registered)].join("\t")
+	).join("\n");
+}
+
+function commitConsolePsn(input, row) {
+	if (!input || !row) return;
+	const psnId = normalizePsnAccountId(input.value);
+	input.value = psnId;
+	upsertHostPsn(row.addr, psnId, row);
+}
+
 function renderSavedList() {
 	const el = $("saved-list");
 	if (!el) return;
+	if (savedListEditingPsn()) return;
+	const rows = consoleAdminRows();
+	const sig = consoleAdminSignature(rows);
+	if (sig === lastConsoleAdminSig && el.dataset.ready === "1") return;
+	lastConsoleAdminSig = sig;
+	el.dataset.ready = "1";
 	el.innerHTML = "";
-	for (const h of savedHosts()) {
+	if (!rows.length) {
 		const li = document.createElement("li");
-		li.innerHTML = `<span>${escapeHtml(h.name && h.name !== h.host ? h.name : maskHostAddr(h.host))} · ${escapeHtml(maskHostAddr(h.host))} · ${h.ps5 ? "PS5" : "PS4"}</span>`;
+		li.className = "console-admin-empty";
+		li.textContent = t("consoles.empty");
+		el.appendChild(li);
+		return;
+	}
+	for (const row of rows) {
+		const li = document.createElement("li");
+		li.dataset.addr = row.addr;
+		const kind = row.ps5 ? "PS5" : "PS4";
+		const bits = [kind];
+		if (row.registered) bits.push(t("host.registered"));
+		if (!row.saved) bits.push(t("consoles.discovered"));
+		if (row.hidden) bits.push(t("consoles.hiddenBadge"));
+		const title = row.name && row.name !== row.addr ? row.name : maskHostAddr(row.addr);
+		li.innerHTML =
+			`<div class="console-admin-main">` +
+				`<div class="console-admin-meta">` +
+					`<strong>${escapeHtml(title)}</strong>` +
+					`<div>${escapeHtml(maskHostAddr(row.addr))} · ${escapeHtml(bits.join(" · "))}</div>` +
+				`</div>` +
+				`<div class="console-admin-actions">` +
+					`<button type="button" class="ghost" data-act="${row.hidden ? "show" : "hide"}">${escapeHtml(t(row.hidden ? "consoles.show" : "consoles.hide"))}</button>` +
+					(row.saved ? `<button type="button" class="ghost" data-act="delete">${escapeHtml(t("consoles.delete"))}</button>` : "") +
+				`</div>` +
+			`</div>` +
+			`<div class="console-admin-psn">` +
+				`<label>${escapeHtml(t("consoles.psn"))}</label>` +
+				`<input type="text" data-act="psn" name="psn-${escapeHtml(row.addr)}" data-i18n-placeholder="consoles.psnPh" placeholder="${escapeHtml(t("consoles.psnPh"))}" value="${escapeHtml(row.psnId || "")}" autocomplete="off" spellcheck="false">` +
+			`</div>`;
+		const hideBtn = li.querySelector("[data-act='hide'], [data-act='show']");
+		if (hideBtn) {
+			hideBtn.onclick = async () => {
+				const set = hiddenSet();
+				if (row.hidden) {
+					set.delete(row.addr);
+					set.delete(normAddr(row.addr));
+				} else {
+					const ok = await askConfirm(t("confirm.hideTitle"), t("confirm.hideText"));
+					if (!ok) return;
+					set.add(row.addr);
+					if (normAddr(row.addr)) set.add(normAddr(row.addr));
+				}
+				persistHidden(set);
+			};
+		}
+		const delBtn = li.querySelector("[data-act='delete']");
+		if (delBtn) {
+			delBtn.onclick = async () => {
+				const ok = await askConfirm(t("confirm.deleteTitle"), t("confirm.deleteText"));
+				if (!ok) return;
+				persistHosts(savedHosts().filter((x) => x.host !== row.addr && normAddr(x.host) !== normAddr(row.addr)));
+			};
+		}
+		const psnInput = li.querySelector("[data-act='psn']");
+		if (psnInput) {
+			psnInput.addEventListener("keydown", (ev) => ev.stopPropagation());
+			psnInput.addEventListener("keyup", (ev) => ev.stopPropagation());
+			psnInput.addEventListener("blur", () => {
+				commitConsolePsn(psnInput, row);
+				lastConsoleAdminSig = "";
+				renderSavedList();
+			});
+		}
 		el.appendChild(li);
 	}
+}
+
+function consoleAdminRows() {
+	const hidden = hiddenSet();
+	const seen = new Set();
+	const rows = [];
+	const isHid = (addr) => hidden.has(addr) || hidden.has(normAddr(addr));
+	for (const h of savedHosts()) {
+		const addr = h.host;
+		seen.add(normAddr(addr));
+		rows.push({
+			addr,
+			name: h.name || addr,
+			ps5: !!h.ps5,
+			saved: true,
+			hidden: isHid(addr),
+			psnId: h.psnId || "",
+			registered: !!(h.registKey && h.morning)
+		});
+	}
+	if (discoveryOn || cloud.homeProxy) {
+		for (const h of discovered) {
+			const ip = normAddr(h.addr);
+			if (!ip || seen.has(ip)) continue;
+			seen.add(ip);
+			rows.push({
+				addr: h.addr,
+				name: h.name || h.addr,
+				ps5: !!h.ps5,
+				saved: false,
+				hidden: isHid(h.addr),
+				psnId: "",
+				registered: false
+			});
+		}
+	}
+	return rows;
+}
+
+function upsertHostPsn(addr, psnId, meta) {
+	const list = savedHosts();
+	const existing = list.find((h) => h.host === addr || normAddr(h.host) === normAddr(addr));
+	if (existing) {
+		if ((existing.psnId || "") === psnId) return;
+		existing.psnId = psnId;
+		persistHosts(list);
+		return;
+	}
+	rememberHost({
+		host: addr,
+		name: (meta && meta.name) || addr,
+		ps5: !!(meta && meta.ps5),
+		id: "",
+		registKey: "",
+		morning: "",
+		psnId
+	});
 }
 
 function renameHost(addr, name) {
@@ -4607,10 +4966,32 @@ function beginHostRename(card, host) {
 	input.onblur = () => finish(true);
 }
 
+function findSavedHost(addr) {
+	const ip = normAddr(addr);
+	return savedHosts().find((h) => h.host === addr || (ip && normAddr(h.host) === ip)) || null;
+}
+
+function psnIdForHost(host) {
+	if (host && host.psnId) return host.psnId;
+	const saved = findSavedHost(host && (host.addr || host.host));
+	if (saved && saved.psnId) return saved.psnId;
+	return settings.psnId || "";
+}
+
 function rememberHost(info) {
-	const list = savedHosts().filter((h) => h.host !== info.host);
-	list.unshift(info);
-	persistHosts(list);
+	const list = savedHosts();
+	const ip = normAddr(info.host);
+	const prev = list.find((h) => h.host === info.host || (ip && normAddr(h.host) === ip));
+	const merged = {
+		host: prev?.host || info.host,
+		name: info.name || prev?.name || info.host,
+		ps5: info.ps5 != null ? !!info.ps5 : !!prev?.ps5,
+		id: info.id || prev?.id || "",
+		registKey: info.registKey != null && info.registKey !== "" ? info.registKey : (prev?.registKey || ""),
+		morning: info.morning != null && info.morning !== "" ? info.morning : (prev?.morning || ""),
+		psnId: info.psnId != null ? String(info.psnId) : (prev?.psnId || "")
+	};
+	persistHosts([merged, ...list.filter((h) => h.host !== merged.host && normAddr(h.host) !== normAddr(merged.host))]);
 }
 
 function looksLikeIpv6(host) {
@@ -4912,7 +5293,9 @@ function shouldSuppressConnectLog(msg) {
 }
 
 function discoveryEnabled() {
-	return cloud.discoveryEnabled !== false && settings.discoveryEnabled !== false;
+	if (settings.discoveryEnabled === false) return false;
+	if (cloud.homeProxy) return true;
+	return cloud.discoveryEnabled !== false;
 }
 
 function applyDiscoveryUi() {
@@ -4945,7 +5328,7 @@ function syncDiscoveryService() {
 	const extras = probeHostList().join(",");
 	const wantLan = discoveryEnabled() && discoveryOn;
 	const want = !!(extras || wantLan);
-	const key = extras;
+	const key = `${wantLan ? "lan" : "probe"}|${extras}`;
 	if (!want) {
 		if (probeRunning) {
 			try { api.discoverStop?.(); } catch {}
@@ -5328,7 +5711,7 @@ function openRegist(host) {
 	$("reg-host").value = host.addr || "";
 	$("reg-host").dataset.real = host.addr || "";
 	$("reg-pin").value = "";
-	$("reg-psn").value = settings.psnId || "";
+	$("reg-psn").value = psnIdForHost(host);
 	$("reg-psn-user").value = "";
 	$("regist-modal").classList.remove("hidden");
 	$("regist-modal").dataset.ps5 = host.ps5 ? "1" : "0";
@@ -5353,7 +5736,7 @@ function rememberDiscoveredIds(rows) {
 		let changed = false;
 		for (const row of rows) {
 			for (const h of saved) {
-				if (!hostsMatch(h, { addr: row.addr, id: row.id, host: h.host })) continue;
+				if (!hostsMatchAddr(h, { addr: row.addr, host: h.host })) continue;
 				if (row.id && h.id !== row.id) { h.id = row.id; changed = true; }
 				if (row.name && h.name !== row.name && (!h.name || h.name === h.host)) {
 					h.name = row.name;
@@ -5362,6 +5745,7 @@ function rememberDiscoveredIds(rows) {
 			}
 		}
 		if (changed) {
+			stateGen++;
 			localStorage.setItem(HOSTS_KEY, JSON.stringify(saved));
 			renderSavedList();
 			scheduleCloudPush();
@@ -5369,23 +5753,32 @@ function rememberDiscoveredIds(rows) {
 	} catch {}
 }
 
+function discoveryAddrKey(h) {
+	const addr = normAddr(h && (h.addr || h.host));
+	return addr ? "addr:" + addr : "";
+}
+
 function applyHostsSnapshot(hosts) {
 	const now = Date.now();
 	const incoming = Array.isArray(hosts) ? hosts.map(normalizeDiscovered) : [];
+	const graceMs = 15000;
 	if (incoming.length > 0) {
-		discovered = incoming;
-		discoveredSeenAt.clear();
-		for (const h of incoming) discoveredSeenAt.set(hostKey(h), now);
-	} else {
-		const graceMs = 15000;
-		discovered = discovered.filter((old) => {
-			const k = hostKey(old);
-			const seen = discoveredSeenAt.get(k) || 0;
-			if (now - seen < graceMs) return true;
-			discoveredSeenAt.delete(k);
-			return false;
-		});
+		for (const h of incoming) {
+			const k = discoveryAddrKey(h);
+			if (!k) continue;
+			const idx = discovered.findIndex((d) => hostsMatchAddr(d, h));
+			if (idx >= 0) discovered[idx] = h;
+			else discovered.unshift(h);
+			discoveredSeenAt.set(k, now);
+		}
 	}
+	discovered = discovered.filter((old) => {
+		const k = discoveryAddrKey(old);
+		const seen = k ? discoveredSeenAt.get(k) || 0 : 0;
+		if (now - seen < graceMs) return true;
+		if (k) discoveredSeenAt.delete(k);
+		return false;
+	});
 	rememberDiscoveredIds(incoming);
 	scheduleRenderHosts();
 	if (currentView === "stream") syncDocumentTitle();
@@ -5393,10 +5786,11 @@ function applyHostsSnapshot(hosts) {
 
 function addDiscovered(host) {
 	const row = normalizeDiscovered(host);
-	const idx = discovered.findIndex((h) => hostsMatch(h, row));
+	const k = discoveryAddrKey(row);
+	const idx = discovered.findIndex((h) => hostsMatchAddr(h, row));
 	if (idx >= 0) discovered[idx] = row;
 	else discovered.unshift(row);
-	discoveredSeenAt.set(hostKey(row), Date.now());
+	if (k) discoveredSeenAt.set(k, Date.now());
 	rememberDiscoveredIds([row]);
 	scheduleRenderHosts();
 }
@@ -5423,6 +5817,7 @@ function fillAddHostIpv4() {
 	const input = $("add-host");
 	if (!input) return;
 	const ip = String(cloud.ipv4 || "").trim();
+	if (cloud.homeProxy || cloud.homeProxyPending) return;
 	if (ip && !input.value.trim()) input.value = ip;
 }
 
@@ -5450,6 +5845,12 @@ async function testAddHostPorts() {
 		out.innerHTML = `<p class="portcheck-sum bad">${escapeHtml(t("add.portcheckBad"))}</p>`;
 		return;
 	}
+	if (isPrivateIpv4(host) && !cloud.homeProxy) {
+		out.classList.remove("hidden");
+		const key = cloud.homeProxyPending ? "add.portcheckNeedApprove" : "add.portcheckNeedHome";
+		out.innerHTML = `<p class="portcheck-sum bad">${escapeHtml(t(key))}</p>`;
+		return;
+	}
 	btn.disabled = true;
 	const prev = btn.textContent;
 	btn.textContent = t("add.portcheckRun");
@@ -5462,14 +5863,21 @@ async function testAddHostPorts() {
 			timeoutMs: 12000
 		});
 		if (typeof body?.ipv4 === "string" && body.ipv4) cloud.ipv4 = body.ipv4;
-		if (!ok || !Array.isArray(body.ports)) {
+		if (body.error === "need_home_proxy" || body.error === "home_proxy_pending") {
+			out.innerHTML = `<p class="portcheck-sum bad">${escapeHtml(t(body.error === "home_proxy_pending" ? "add.portcheckNeedApprove" : "add.portcheckNeedHome"))}</p>`;
+			return;
+		}
+		if (!ok || !Array.isArray(body.ports) || !body.ports.length) {
 			out.innerHTML = `<p class="portcheck-sum bad">${escapeHtml(t(body.error === "invalid_host" ? "add.portcheckBad" : "add.portcheckFail"))}</p>`;
 			return;
 		}
 		const tcp = body.ports.find((p) => p.port === 9295 && p.proto === "tcp");
 		const tcpOk = !!(tcp && tcp.status === "open") || body.ok === true;
+		const viaHome = body.via === "home" || cloud.homeProxy;
 		const sumClass = tcpOk ? "ok" : "bad";
-		const sum = tcpOk ? t("add.portcheckOk") : t("add.portcheckWarn");
+		const sum = tcpOk
+			? t(viaHome ? "add.portcheckOkHome" : "add.portcheckOk")
+			: t(viaHome ? "add.portcheckWarnHome" : "add.portcheckWarn");
 		out.innerHTML = `<p class="portcheck-sum ${sumClass}">${escapeHtml(sum)}</p>`;
 		if (tcpOk) {
 			addPortcheckOk = true;
@@ -5567,6 +5975,12 @@ function bindUi() {
 		renderHosts();
 	};
 
+	$("btn-help").onclick = () => openHelpModal();
+	$("help-close")?.addEventListener("click", () => closeHelpModal());
+	$("help-modal")?.addEventListener("click", (e) => {
+		if (e.target.id === "help-modal") closeHelpModal();
+	});
+
 	$("btn-add").onclick = () => {
 		const out = $("add-portcheck-out");
 		if (out) {
@@ -5574,6 +5988,7 @@ function bindUi() {
 			out.innerHTML = "";
 		}
 		$("add-name").value = "";
+		$("add-psn").value = "";
 		$("add-regist").value = "";
 		$("add-morning").value = "";
 		$("add-host").value = "";
@@ -5606,6 +6021,14 @@ function bindUi() {
 	});
 	document.addEventListener("keydown", (e) => {
 		if (e.key !== "Escape") return;
+		if (!$("home-proxy-modal")?.classList.contains("hidden")) {
+			rejectHomeProxy();
+			return;
+		}
+		if (!$("help-modal")?.classList.contains("hidden")) {
+			closeHelpModal();
+			return;
+		}
 		if (!$("share-modal")?.classList.contains("hidden")) {
 			closeShareModal();
 			return;
@@ -5776,7 +6199,8 @@ function bindUi() {
 			name: $("add-name").value.trim() || host,
 			ps5: $("add-ps5").value === "1",
 			registKey: $("add-regist").value.trim(),
-			morning: $("add-morning").value.trim()
+			morning: $("add-morning").value.trim(),
+			psnId: normalizePsnAccountId($("add-psn")?.value || "")
 		});
 		$("add-modal").classList.add("hidden");
 	};
@@ -5788,24 +6212,27 @@ function bindUi() {
 		const pin = Number($("reg-pin").value);
 		if (!pin) return log(t("log.pinRequired"), 0);
 		const ps5 = Number($("regist-modal").dataset.ps5);
-		const psnId = normalizePsnAccountId($("reg-psn").value || settings.psnId);
+		const host = ($("reg-host").dataset.real || $("reg-host").value).trim();
+		const psnId = normalizePsnAccountId($("reg-psn").value || psnIdForHost({ addr: host }));
 		if (ps5 && !psnIdLooksValid(psnId)) {
 			log(t("log.psnHint"), 0);
 			$("psn-regist-fields").classList.remove("hidden");
 			$("reg-psn").focus();
 			return;
 		}
-		if (psnId) persistPsnId(psnId);
-		const host = ($("reg-host").dataset.real || $("reg-host").value).trim();
 		if (looksLikeIpv6(host)) {
 			log(t("log.registIpv6"), 0);
 			return;
 		}
+		if (psnId) upsertHostPsn(host, psnId, { name: $("regist-modal").dataset.name, ps5 });
 		if (host && !isPrivateIpv4(host)) log(t("log.registLanHint"), 0);
 		await ensureWasmRuntime();
 		api.regist?.(host, pin, psnId, ps5, 0);
 	};
 
+	$("home-proxy-approve")?.addEventListener("click", () => approveHomeProxy());
+	$("home-proxy-reject")?.addEventListener("click", () => rejectHomeProxy());
+	$("btn-home-proxy-disconnect")?.addEventListener("click", () => disconnectHomeProxy());
 	$("btn-pin-ok").onclick = () => {
 		api.sessionSetPin($("login-pin").value.trim());
 		$("pin-modal").classList.add("hidden");
@@ -5839,15 +6266,16 @@ function bindUi() {
 		e.preventDefault();
 		applyCapturedCode(e.deltaY < 0 ? "WheelUp" : "WheelDown");
 	}, { passive: false });
-	$("btn-proxy-edit").onclick = openProxyEditor;
-	$("proxy-apply").onclick = applyProxyFromModal;
-	$("proxy-default").onclick = () => { $("proxy-url-input").value = defaultProxyUrl(); };
-	$("proxy-cancel").onclick = () => $("proxy-modal").classList.add("hidden");
-	$("proxy-modal").addEventListener("click", (e) => {
-		if (e.target.id === "proxy-modal") $("proxy-modal").classList.add("hidden");
+	$("s-proxy-mode")?.addEventListener("change", (e) => {
+		e.stopPropagation();
+		applyProxyModeFromForm();
 	});
-	$("proxy-url-input").addEventListener("keydown", (e) => {
-		if (e.key === "Enter") applyProxyFromModal();
+	$("btn-proxy-apply")?.addEventListener("click", applyCustomProxyFromForm);
+	$("s-proxy-url")?.addEventListener("keydown", (e) => {
+		if (e.key === "Enter") {
+			e.preventDefault();
+			applyCustomProxyFromForm();
+		}
 	});
 	$("confirm-modal").addEventListener("click", (e) => {
 		if (e.target.id === "confirm-modal") {
@@ -6079,12 +6507,14 @@ function bindModule() {
 	};
 	Module.onRegist = (info) => {
 		if (!info.ok) return log(t("log.registFailed", { error: info.error || "" }), 0);
+		const host = ($("reg-host").dataset.real || $("reg-host").value).trim();
 		rememberHost({
-			host: ($("reg-host").dataset.real || $("reg-host").value).trim(),
+			host,
 			name: $("regist-modal").dataset.name || info.nickname,
 			ps5: !!info.ps5,
 			registKey: info.registKey,
-			morning: info.morning
+			morning: info.morning,
+			psnId: normalizePsnAccountId($("reg-psn")?.value || "")
 		});
 		$("regist-modal").classList.add("hidden");
 		log(t("log.registered", { name: info.nickname }));
@@ -6171,6 +6601,7 @@ async function startWasmRuntime() {
 		await waitFor(() => api.netReady() === 1, 8000);
 		proxyState = "connected";
 		refreshProxyStatus();
+		if (cloud.homeProxy) startDiscovery();
 	} catch {
 		proxyState = "offline";
 		refreshProxyStatus();
@@ -6190,7 +6621,10 @@ function ensureWasmRuntime() {
 }
 
 function scheduleWasmWarmup() {
-	const kick = () => { ensureWasmRuntime().catch(() => {}); };
+	const kick = () => {
+		if (cloud.homeProxyPending) return;
+		ensureWasmRuntime().catch(() => {});
+	};
 	const onFirstInput = () => {
 		document.removeEventListener("pointerdown", onFirstInput, true);
 		kick();

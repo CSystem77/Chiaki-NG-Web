@@ -150,6 +150,36 @@ function encode(type, id, fd, a, b, c, payload) {
 	return buf;
 }
 
+const AGENT_HDR = 16;
+const A = {
+	OPEN: 1, CLOSE: 2, DATA: 3, PING: 4, PONG: 5,
+	PORTCHECK: 6, PORTCHECK_RES: 7, HELLO: 8, HELLO_OK: 9,
+	REJECTED: 10, APPROVED: 11
+};
+
+function encodeAgent(type, sid, extra, payload) {
+	const plen = payload ? payload.length : 0;
+	const buf = Buffer.alloc(AGENT_HDR + plen);
+	buf.writeUInt8(type, 0);
+	buf.writeUInt32LE(sid >>> 0, 4);
+	buf.writeUInt32LE(plen, 8);
+	buf.writeUInt32LE(extra >>> 0, 12);
+	if (plen) payload.copy(buf, AGENT_HDR);
+	return buf;
+}
+
+function readAgent(buf) {
+	if (buf.length < AGENT_HDR) return null;
+	const len = buf.readUInt32LE(8);
+	return {
+		type: buf.readUInt8(0),
+		sid: buf.readUInt32LE(4),
+		len,
+		extra: buf.readUInt32LE(12),
+		payload: buf.subarray(AGENT_HDR, AGENT_HDR + len)
+	};
+}
+
 function wsAccept(key) {
 	return crypto.createHash("sha1")
 		.update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
@@ -514,7 +544,13 @@ function sendFile(req, res, file) {
 			res.end();
 		});
 		const wantsGzip = /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""));
-		const skipGzip = [".png", ".wasm", ".woff", ".woff2"].includes(ext);
+		const base = path.basename(file);
+		const skipGzip = [".png", ".wasm", ".woff", ".woff2", ".exe"].includes(ext)
+			|| base.startsWith("chiaki-proxy");
+		if (base.startsWith("chiaki-proxy")) {
+			headers["Content-Disposition"] = `attachment; filename="${base}"`;
+			headers["Cache-Control"] = "no-store";
+		}
 		if (wantsGzip && !skipGzip) {
 			headers["Content-Encoding"] = "gzip";
 			headers.Vary = "Accept-Encoding";
@@ -587,6 +623,249 @@ function sessionCookie(token, maxAgeSec, secure) {
 
 const shareHub = createShareHub({ store, decodeWsFrame, wsAccept, readCookie });
 
+class HomeAgents {
+	constructor() {
+		this.byUser = new Map();
+		this.nextSid = 1;
+	}
+
+	online(userId) {
+		const rec = this.byUser.get(userId);
+		return !!(rec && rec.approved);
+	}
+
+	info(userId) {
+		const rec = this.byUser.get(userId);
+		if (!rec) return { homeProxy: false, homeProxyPending: false, homeProxyName: "" };
+		return {
+			homeProxy: !!rec.approved,
+			homeProxyPending: !rec.approved,
+			homeProxyName: rec.pcName || ""
+		};
+	}
+
+	dropUser(userId, dyingSocket) {
+		const rec = this.byUser.get(userId);
+		if (!rec) return;
+		if (dyingSocket && rec.socket !== dyingSocket) return;
+		try { clearInterval(rec.pingTimer); } catch {}
+		for (const session of rec.sessions.values()) {
+			try { session.socket.end(); } catch {}
+			try { session.socket.destroy(); } catch {}
+		}
+		rec.sessions.clear();
+		for (const fn of rec.pending.values()) {
+			try { fn(0); } catch {}
+		}
+		rec.pending.clear();
+		if (this.byUser.get(userId) === rec)
+			this.byUser.delete(userId);
+		if (rec.socket && rec.socket !== dyingSocket) {
+			try { rec.socket.end(); } catch {}
+			try { rec.socket.destroy(); } catch {}
+		}
+	}
+
+	send(rec, buf) {
+		try { rec.socket.write(encodeWsFrame(buf)); } catch {}
+	}
+
+	closeSession(rec, sid) {
+		const session = rec.sessions.get(sid);
+		if (!session) return;
+		rec.sessions.delete(sid);
+		this.send(rec, encodeAgent(A.CLOSE, sid, 0, null));
+		try { session.socket.end(); } catch {}
+		try { session.socket.destroy(); } catch {}
+	}
+
+	pipePosix(user, socket) {
+		const rec = this.byUser.get(user.id);
+		if (!rec || !rec.approved) return false;
+		const sid = this.nextSid++;
+		const session = { socket, acc: Buffer.alloc(0) };
+		rec.sessions.set(sid, session);
+		this.send(rec, encodeAgent(A.OPEN, sid, 0, null));
+		console.log(`Home proxy: session ${sid} → agent user ${user.id}`);
+		const onClose = () => {
+			if (!rec.sessions.has(sid)) return;
+			rec.sessions.delete(sid);
+			this.send(rec, encodeAgent(A.CLOSE, sid, 0, null));
+		};
+		socket.on("data", (chunk) => {
+			session.acc = Buffer.concat([session.acc, chunk]);
+			for (;;) {
+				const frame = decodeWsFrame(session.acc);
+				if (!frame) break;
+				session.acc = frame.rest;
+				if (frame.opcode === 0x8) {
+					onClose();
+					try { socket.end(); } catch {}
+					return;
+				}
+				if (frame.opcode === 0x9) {
+					const pong = Buffer.from(frame.payload);
+					socket.write(Buffer.concat([Buffer.from([0x8a, pong.length]), pong]));
+					continue;
+				}
+				if (frame.opcode === 0x2 || frame.opcode === 0x1)
+					this.send(rec, encodeAgent(A.DATA, sid, 0, frame.payload));
+			}
+		});
+		socket.on("close", onClose);
+		socket.on("error", onClose);
+		return true;
+	}
+
+	portCheck(userId, host, port, ms) {
+		return new Promise((resolve) => {
+			const rec = this.byUser.get(userId);
+			const fail = (status) => resolve({
+				ports: [{ port, proto: "tcp", role: "session", status }],
+				via: "home"
+			});
+			if (!rec) return fail("filtered");
+			if (!rec.approved) return fail("filtered");
+			const sid = this.nextSid++;
+			const timer = setTimeout(() => {
+				rec.pending.delete(sid);
+				fail("filtered");
+			}, ms);
+			rec.pending.set(sid, (extra) => {
+				clearTimeout(timer);
+				const status = extra === 1 ? "open" : extra === 2 ? "closed" : "filtered";
+				resolve({
+					ports: [{ port, proto: "tcp", role: "session", status }],
+					via: "home"
+				});
+			});
+			this.send(rec, encodeAgent(A.PORTCHECK, sid, port, Buffer.from(String(host), "utf8")));
+		});
+	}
+
+	handleAgentFrame(rec, user, payload) {
+		const msg = readAgent(payload);
+		if (!msg) return;
+		if (msg.type === A.PONG) return;
+		if (msg.type === A.PING) {
+			this.send(rec, encodeAgent(A.PONG, msg.sid, 0, null));
+			return;
+		}
+		if (msg.type === A.HELLO) {
+			let pcName = "";
+			try {
+				const j = JSON.parse(msg.payload.toString("utf8"));
+				pcName = String(j && j.name || "").trim().slice(0, 64);
+			} catch {}
+			rec.pcName = pcName;
+			const name = String(user.username || user.email || user.id);
+			const body = Buffer.from(JSON.stringify({
+				ok: true,
+				user: name,
+				email: user.email || null,
+				approved: !!rec.approved
+			}), "utf8");
+			this.send(rec, encodeAgent(A.HELLO_OK, 0, rec.approved ? 1 : 0, body));
+			return;
+		}
+		if (msg.type === A.PORTCHECK_RES) {
+			const fn = rec.pending.get(msg.sid);
+			if (fn) {
+				rec.pending.delete(msg.sid);
+				fn(msg.extra);
+			}
+			return;
+		}
+		if (msg.type === A.CLOSE) {
+			const session = rec.sessions.get(msg.sid);
+			if (!session) return;
+			rec.sessions.delete(msg.sid);
+			try { session.socket.end(); } catch {}
+			try { session.socket.destroy(); } catch {}
+			return;
+		}
+		if (msg.type === A.DATA) {
+			const session = rec.sessions.get(msg.sid);
+			if (!session) return;
+			try { session.socket.write(encodeWsFrame(msg.payload)); } catch {}
+		}
+	}
+
+	attach(req, socket, user) {
+		this.dropUser(user.id);
+		const rec = {
+			socket,
+			userId: user.id,
+			sessions: new Map(),
+			pending: new Map(),
+			acc: Buffer.alloc(0),
+			helloAt: Date.now(),
+			pingTimer: null
+		};
+		this.byUser.set(user.id, rec);
+		rec.approved = false;
+		rec.pcName = "";
+		const who = user.email || user.username || user.id;
+		const ip = clientIpv4(req) || req.socket?.remoteAddress || "";
+		console.log(`Home proxy: agent connecté (${who}) depuis ${ip || "?"}`);
+		rec.pingTimer = setInterval(() => {
+			this.send(rec, encodeAgent(A.PING, 0, 0, null));
+		}, 20000);
+		socket.on("data", (chunk) => {
+			rec.acc = Buffer.concat([rec.acc, chunk]);
+			for (;;) {
+				const frame = decodeWsFrame(rec.acc);
+				if (!frame) break;
+				rec.acc = frame.rest;
+				if (frame.opcode === 0x8) {
+					this.dropUser(user.id);
+					try { socket.end(); } catch {}
+					return;
+				}
+				if (frame.opcode === 0x9) {
+					const pong = Buffer.from(frame.payload);
+					socket.write(Buffer.concat([Buffer.from([0x8a, pong.length]), pong]));
+					continue;
+				}
+				if (frame.opcode === 0xa) continue;
+				if (frame.opcode === 0x2 || frame.opcode === 0x1)
+					this.handleAgentFrame(rec, user, frame.payload);
+			}
+		});
+		socket.on("close", () => {
+			if (this.byUser.get(user.id) === rec) {
+				console.log(`Home proxy: agent déconnecté (${who})`);
+				this.dropUser(user.id, socket);
+			}
+		});
+		socket.on("error", () => {
+			if (this.byUser.get(user.id) === rec)
+				this.dropUser(user.id, socket);
+		});
+	}
+
+	approve(userId) {
+		const rec = this.byUser.get(userId);
+		if (!rec) return false;
+		rec.approved = true;
+		this.send(rec, encodeAgent(A.APPROVED, 0, 0, null));
+		console.log(`Home proxy: approuvé user ${userId}`);
+		return true;
+	}
+
+	reject(userId, stayDown = false) {
+		const rec = this.byUser.get(userId);
+		if (!rec) return false;
+		rec.approved = false;
+		this.send(rec, encodeAgent(A.REJECTED, 0, stayDown ? 1 : 0, null));
+		console.log(`Home proxy: ${stayDown ? "déconnecté" : "refusé"} user ${userId}`);
+		setTimeout(() => this.dropUser(userId), 150);
+		return true;
+	}
+}
+
+const homeAgents = new HomeAgents();
+
 function json(res, status, body, extraHeaders) {
 	const headers = {
 		"Content-Type": "application/json; charset=utf-8",
@@ -609,6 +888,17 @@ function isCheckableIpv4(ip) {
 	return true;
 }
 
+function isPrivateIpv4(ip) {
+	const m = String(ip || "").trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+	if (!m) return false;
+	const a = Number(m[1]);
+	const b = Number(m[2]);
+	if (a === 10) return true;
+	if (a === 192 && b === 168) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	return false;
+}
+
 function clientIpv4(req) {
 	const hdrs = [
 		req.headers["cf-connecting-ip"],
@@ -628,8 +918,21 @@ function clientIpv4(req) {
 	return isCheckableIpv4(ip) ? ip : "";
 }
 
+function isElectronReq(req) {
+	return /\bElectron\b/i.test(String(req.headers["user-agent"] || ""));
+}
+
 function publicMeta(req, user) {
-	return { ...store.meta(user), ipv4: clientIpv4(req) };
+	const info = user && !isElectronReq(req)
+		? homeAgents.info(user.id)
+		: { homeProxy: false, homeProxyPending: false, homeProxyName: "" };
+	const meta = store.meta(user);
+	return {
+		...meta,
+		ipv4: clientIpv4(req),
+		...info,
+		discoveryEnabled: meta.discoveryEnabled !== false || !!info.homeProxy
+	};
 }
 
 function checkTcpPort(host, port, ms) {
@@ -653,9 +956,19 @@ function checkTcpPort(host, port, ms) {
 
 const portCheckAt = new Map();
 
-async function runPortCheck(host) {
+async function runPortCheck(host, user) {
+	if (user && homeAgents.online(user.id))
+		return homeAgents.portCheck(user.id, host, 9295, 3500);
+	if (isPrivateIpv4(host)) {
+		const info = user ? homeAgents.info(user.id) : { homeProxyPending: false };
+		return {
+			error: info.homeProxyPending ? "home_proxy_pending" : "need_home_proxy",
+			ports: [],
+			via: "wan"
+		};
+	}
 	const status = await checkTcpPort(host, 9295, 2000);
-	return { ports: [{ port: 9295, proto: "tcp", role: "session", status }] };
+	return { ports: [{ port: 9295, proto: "tcp", role: "session", status }], via: "wan" };
 }
 
 function readBody(req, limit = 1024 * 1024) {
@@ -699,6 +1012,45 @@ async function handleApi(req, res, reqUrl) {
 
 	if (route === "GET /api/meta") {
 		json(res, 200, publicMeta(req, currentUser(req)));
+		return true;
+	}
+	if (route === "POST /api/proxy/approve") {
+		const user = requireUser(req, res);
+		if (!user) return true;
+		if (!homeAgents.approve(user.id)) {
+			json(res, 404, { error: "no_agent" });
+			return true;
+		}
+		json(res, 200, publicMeta(req, user));
+		return true;
+	}
+	if (route === "POST /api/proxy/reject") {
+		const user = requireUser(req, res);
+		if (!user) return true;
+		homeAgents.reject(user.id, false);
+		json(res, 200, publicMeta(req, user));
+		return true;
+	}
+	if (route === "POST /api/proxy/disconnect") {
+		const user = requireUser(req, res);
+		if (!user) return true;
+		homeAgents.reject(user.id, true);
+		json(res, 200, publicMeta(req, user));
+		return true;
+	}
+	if (route === "GET /api/proxy-builds") {
+		const dir = path.join(WWW, "downloads");
+		const files = {
+			windows: "chiaki-proxy-windows.exe",
+			linux: "chiaki-proxy-linux",
+			macos: "chiaki-proxy-macos"
+		};
+		const builds = {};
+		for (const [k, name] of Object.entries(files)) {
+			const fp = path.join(dir, name);
+			builds[k] = fs.existsSync(fp) ? "/downloads/" + name : null;
+		}
+		json(res, 200, builds);
 		return true;
 	}
 	if (route === "POST /api/login") {
@@ -871,7 +1223,7 @@ async function handleApi(req, res, reqUrl) {
 			return true;
 		}
 		portCheckAt.set(user.id, now);
-		const result = await runPortCheck(host);
+		const result = await runPortCheck(host, isElectronReq(req) ? null : user);
 		const tcp = (result.ports || []).find((p) => p.port === 9295 && p.proto === "tcp");
 		json(res, 200, {
 			...result,
@@ -940,13 +1292,62 @@ function handleRequest(req, res) {
 	});
 }
 
+function isHomeAgentUpgrade(req) {
+	const raw = String(req.url || "");
+	const pathName = raw.split("?")[0];
+	if (pathName === "/posix-agent" || pathName.startsWith("/posix-agent"))
+		return true;
+	if (pathName === "/posix-net/agent" || pathName.startsWith("/posix-net/agent"))
+		return true;
+	if (pathName === "/posix-net" || pathName.startsWith("/posix-net")) {
+		try {
+			return new URL(raw, "http://localhost").searchParams.get("agent") === "1";
+		} catch {
+			return /[?&]agent=1(?:&|$)/.test(raw);
+		}
+	}
+	return false;
+}
+
+function completeWsUpgrade(req, socket) {
+	const key = req.headers["sec-websocket-key"];
+	if (!key) {
+		socket.destroy();
+		return false;
+	}
+	socket.write(
+		"HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		`Sec-WebSocket-Accept: ${wsAccept(key)}\r\n` +
+		"Sec-WebSocket-Protocol: binary\r\n" +
+		"\r\n"
+	);
+	socket.setNoDelay(true);
+	return true;
+}
+
 function attachUpgrade(server) {
 	server.on("upgrade", (req, socket) => {
-		if ((req.url || "").startsWith("/share-sig")) {
+		const pathName = String(req.url || "").split("?")[0];
+		if (pathName.startsWith("/share-sig")) {
 			shareHub.attach(req, socket);
 			return;
 		}
-		if (!req.url.startsWith("/posix-net")) {
+		if (isHomeAgentUpgrade(req)) {
+			const user = cfg.authEnabled
+				? store.userBySession(readCookie(req, "chiaki_sid"))
+				: store.ensureLocalUser();
+			if (!user) {
+				socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+				socket.destroy();
+				return;
+			}
+			if (!completeWsUpgrade(req, socket)) return;
+			homeAgents.attach(req, socket, user);
+			return;
+		}
+		if (!pathName.startsWith("/posix-net")) {
 			socket.destroy();
 			return;
 		}
@@ -955,20 +1356,10 @@ function attachUpgrade(server) {
 			socket.destroy();
 			return;
 		}
-		const key = req.headers["sec-websocket-key"];
-		if (!key) {
-			socket.destroy();
+		if (!completeWsUpgrade(req, socket)) return;
+		const user = currentUser(req);
+		if (user && !isElectronReq(req) && homeAgents.pipePosix(user, socket))
 			return;
-		}
-		socket.write(
-			"HTTP/1.1 101 Switching Protocols\r\n" +
-			"Upgrade: websocket\r\n" +
-			"Connection: Upgrade\r\n" +
-			`Sec-WebSocket-Accept: ${wsAccept(key)}\r\n` +
-			"Sec-WebSocket-Protocol: binary\r\n" +
-			"\r\n"
-		);
-		socket.setNoDelay(true);
 		let acc = Buffer.alloc(0);
 		const emit = (payload) => {
 			try { socket.write(encodeWsFrame(payload)); } catch {}
@@ -1050,6 +1441,7 @@ export async function startServers() {
 	const url = `http://${bindHost}:${port}/`;
 	console.log(`chiaki-ng WASM (local): ${url}`);
 	console.log(`POSIX proxy WS: ws://${bindHost}:${port}/posix-net`);
+	console.log(`Home proxy agent: ws://${bindHost}:${port}/posix-net?agent=1`);
 	console.log(`Fichiers UI: ${WWW}`);
 	console.log(`Binaire WASM: ${ROOT}`);
 	console.log(`SQLite: ${cfg.dbPath}`);

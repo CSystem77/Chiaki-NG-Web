@@ -74,6 +74,7 @@
 			<button class="fab" id="btn-discover" type="button" data-i18n-title="discovery" title="Discovery" aria-pressed="false">
 				<img id="fab-icon" src="icons/discover-off-24px.svg" alt="">
 			</button>
+			<button class="fab fab-help" id="btn-help" type="button" data-i18n-title="help.fab" title="Help" aria-label="?">?</button>
 			<button class="version" id="app-version" type="button" title="Credits">1.10.0</button>
 		</main>
 
@@ -260,11 +261,11 @@
 					</div>
 				</div>
 				<div class="tab-page hidden" data-page="consoles">
-					<p class="hint" data-i18n="consoles.hint">Registered hosts are stored in this browser. Hidden discovered consoles stay hidden until cleared.</p>
-					<ul id="saved-list" class="mini-list"></ul>
+					<p class="hint" data-i18n="consoles.hint">Registered and discovered consoles. Each can have its own PSN Account ID (base64). Hidden consoles stay hidden until you show them again.</p>
+					<ul id="saved-list" class="mini-list console-admin-list"></ul>
 					<div class="form-row">
 						<label></label>
-						<button type="button" class="ghost" id="btn-clear-hidden" data-i18n="consoles.clearHidden">Clear Hidden Consoles</button>
+						<button type="button" class="ghost" id="btn-clear-hidden" data-i18n="consoles.clearHidden">Show all hidden consoles</button>
 					</div>
 				</div>
 				<div class="tab-page hidden" data-page="keys">
@@ -337,13 +338,36 @@
 					</div>
 				</div>
 				<div class="tab-page hidden" data-page="config">
-					<p class="hint" data-i18n="config.hint">LAN Remote Play only. PSN / holepunch is not available in the WASM build.</p>
+					<p class="hint" id="config-hint" data-i18n="config.hint">LAN Remote Play only. PSN / holepunch is not available in the WASM build.</p>
 					<div class="form-row">
-						<label data-i18n="config.proxy">POSIX proxy:</label>
+						<label data-i18n="config.proxy">Proxy :</label>
 						<div class="proxy-row">
+							<select id="s-proxy-mode">
+								<option value="default" data-i18n="config.proxyModeDefault">Default</option>
+								<option value="custom" data-i18n="config.proxyModeCustom">Custom</option>
+							</select>
 							<span class="plain" id="proxy-status">—</span>
-							<button type="button" class="ghost" id="btn-proxy-edit" data-i18n="config.proxyEdit">Edit</button>
+							<button type="button" class="ghost hidden" id="btn-home-proxy-disconnect" data-i18n="config.homeProxyDisconnect">Disconnect</button>
 						</div>
+					</div>
+					<div class="form-row hidden" id="proxy-custom-row">
+						<label></label>
+						<div class="lookup-row">
+							<input id="s-proxy-url" spellcheck="false" autocomplete="off" data-i18n-placeholder="config.proxyUrlPh" placeholder="wss://…">
+							<button type="button" class="ghost" id="btn-proxy-apply" data-i18n="config.proxyApply">Apply</button>
+						</div>
+					</div>
+					<p class="hint hidden" id="proxy-home-hint" data-i18n="config.homeProxyOn">Home proxy is online. Traffic goes through your PC — no router ports to open.</p>
+					<p class="hint" data-i18n="config.proxyHelp">By default, this page’s local proxy is used. Custom lets you set another WebSocket URL (ws:// or wss://).</p>
+					<div id="proxy-dl-block">
+					<div class="form-row" id="proxy-dl-row">
+						<label data-i18n="config.proxyDl">Chiaki Home Proxy:</label>
+						<div class="proxy-dl-row" id="proxy-dl-btns">
+							<a class="proxy-dl-win" id="proxy-dl-windows" href="/downloads/chiaki-proxy-windows.exe" download data-i18n="config.proxyDlWin">Download for Windows</a>
+							<a class="proxy-dl-win" id="proxy-dl-linux" href="/downloads/chiaki-proxy-linux" download data-i18n="config.proxyDlLinux">Download for Linux</a>
+						</div>
+					</div>
+					<p class="hint" data-i18n="config.proxyDlHelp">Download it, run it on the PC next to your console, then sign in with this account. No router ports to open.</p>
 					</div>
 					<div class="form-row">
 						<label data-i18n="config.psn">PSN Account ID (base64):</label>
@@ -356,7 +380,7 @@
 							<button type="button" class="ghost" id="btn-psn-lookup" data-i18n="regist.lookup">Look up</button>
 						</div>
 					</div>
-					<p class="hint" data-i18n="config.psnHelp">PS5 registration needs this 8-byte ID (base64). Paste it from chiaki-ng, a numeric user ID, or look it up from your PSN username (search must be allowed in PSN privacy).</p>
+					<p class="hint" data-i18n="config.psnHelp">Default PSN Account ID (8-byte base64) for new PS5 registrations. Each console can also have its own ID in the Consoles tab.</p>
 				</div>
 			</div>
 		</section>
@@ -455,6 +479,7 @@
 					<button type="button" class="ghost" id="add-portcheck" data-i18n="add.portcheck">Tester</button>
 				</div>
 			</label>
+			<p class="hint hidden" id="add-home-hint"></p>
 			<div id="add-portcheck-out" class="portcheck hidden"></div>
 			<label><span data-i18n="add.name">Name</span><input id="add-name" placeholder="Streetpea's PS5"></label>
 			<label><span data-i18n="add.console">Console</span>
@@ -463,6 +488,7 @@
 					<option value="0">PS4</option>
 				</select>
 			</label>
+			<label><span data-i18n="add.psn">PSN Account ID (base64)</span><input id="add-psn" data-i18n-placeholder="add.psnPh" placeholder="optional, PS5 regist" autocomplete="off"></label>
 			<label><span data-i18n="add.regist">Regist Key</span><input id="add-regist" data-i18n-placeholder="add.registPh" placeholder="optional if already registered"></label>
 			<label><span data-i18n="add.morning">RP Key / Morning</span><input id="add-morning" data-i18n-placeholder="add.morningPh" placeholder="32 hex chars"></label>
 			</div>
@@ -492,6 +518,17 @@
 			<div class="modal-actions">
 				<button type="button" id="reg-ok" class="primary" data-i18n="regist.ok">Register</button>
 				<button type="button" id="reg-cancel" data-i18n="regist.cancel">Cancel</button>
+			</div>
+		</div>
+	</div>
+
+	<div id="home-proxy-modal" class="modal hidden">
+		<div class="modal-card">
+			<h3 data-i18n="config.proxyApproveTitle">Chiaki Home Proxy</h3>
+			<p id="home-proxy-modal-text"></p>
+			<div class="modal-actions">
+				<button type="button" id="home-proxy-approve" class="primary" data-i18n="config.proxyApproveBtn">Approve</button>
+				<button type="button" id="home-proxy-reject" data-i18n="config.proxyCancelBtn">Cancel</button>
 			</div>
 		</div>
 	</div>
@@ -529,6 +566,16 @@
 		</div>
 	</div>
 
+	<div id="help-modal" class="modal hidden">
+		<div class="modal-card help-card">
+			<div class="help-modal-bar">
+				<h3 data-i18n="help.title">Aide</h3>
+				<button type="button" class="help-close" id="help-close" data-i18n="help.close">Fermer</button>
+			</div>
+			<iframe id="help-frame" title="Documentation"></iframe>
+		</div>
+	</div>
+
 	<div id="credits-modal" class="modal hidden">
 		<div class="modal-card credits-card">
 			<h3>Credits</h3>
@@ -556,19 +603,6 @@
 			<div class="modal-actions">
 				<button type="button" id="btn-pin-ok" class="primary" data-i18n="pin.send">Send</button>
 				<button type="button" id="btn-pin-cancel" data-i18n="pin.cancel">Cancel</button>
-			</div>
-		</div>
-	</div>
-
-	<div id="proxy-modal" class="modal hidden">
-		<div class="modal-card">
-			<h3 data-i18n="config.proxyTitle">POSIX proxy</h3>
-			<p data-i18n="config.proxyHelp">WebSocket URL of the local POSIX proxy (ws:// or wss://).</p>
-			<input id="proxy-url-input" spellcheck="false" autocomplete="off">
-			<div class="modal-actions">
-				<button type="button" id="proxy-apply" class="primary" data-i18n="config.proxyApply">Apply</button>
-				<button type="button" id="proxy-default" data-i18n="config.proxyDefault">Default</button>
-				<button type="button" id="proxy-cancel" data-i18n="add.cancel">Cancel</button>
 			</div>
 		</div>
 	</div>
