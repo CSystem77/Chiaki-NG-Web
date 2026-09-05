@@ -1093,8 +1093,7 @@ kbd {
 	pointer-events: none;
 	transition: opacity 0.18s ease, transform 0.18s ease;
 }
-.stream.show-chrome .stream-bar,
-.stream .stream-bar:focus-within {
+.stream.show-chrome .stream-bar {
 	opacity: 1;
 	transform: none;
 	pointer-events: auto;

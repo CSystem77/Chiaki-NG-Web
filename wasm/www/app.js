@@ -260,6 +260,8 @@ let discovered = [];
 let discoveredSeenAt = new Map();
 let hostsRenderTimer = 0;
 let lastConsoleAdminSig = "";
+let lastHostListSig = "";
+let hostsPointerDown = false;
 let discoveryRestartTimer = 0;
 let currentView = "welcome";
 let streamTitleName = "";
@@ -4635,116 +4637,175 @@ function askConfirm(title, text, labels) {
 	});
 }
 
+function hostView(h) {
+	const revealed = revealedAddrSet();
+	const state = wakingAddrs.has(h.addr) ? "waking" : (h.state || "unknown");
+	const registered = h.registered ? t("host.registered") : t("host.unregistered");
+	const origin = h.discovered && h.manual ? t("host.discoveredManual")
+		: h.discovered ? t("host.discovered") : t("host.manual");
+	const idLine = t("host.id", { id: h.id || "—", status: registered });
+	const actionLabel = h.manual && !h.discovered ? t("host.delete") : (!h.registered ? t("host.hide") : "");
+	const act = h.manual && !h.discovered ? "delete" : "hide";
+	const stateKey = "state." + state;
+	const stateName = t(stateKey) === stateKey ? state : t(stateKey);
+	const stateText = t("host.state", { state: stateName }) + (h.appName ? "\n" + t("host.app", { app: h.appName }) : "");
+	const addrShown = revealed.has(h.addr);
+	const displayAddr = addrShown ? h.addr : maskHostAddr(h.addr);
+	const rawName = h.name || h.addr;
+	const displayName = (!h.name || h.name === h.addr) && !addrShown ? maskHostAddr(h.addr) : rawName;
+	const iconCls = state === "ready" ? "ready" : (state === "standby" || state === "waking" ? "standby" : "unknown");
+	const wantWake = !!(h.registered && h.registKey && state !== "ready");
+	return { h, state, origin, idLine, actionLabel, act, stateText, addrShown, displayAddr, displayName, iconCls, wantWake };
+}
+
+function hostStructureSig(views) {
+	return uiLanguage() + "\n" + views.map((v) => [
+		v.h.addr, v.h.name || "", Number(!!v.h.ps5), Number(!!v.h.registered),
+		Number(!!v.h.discovered), Number(!!v.h.manual), Number(!!v.addrShown),
+		v.act, v.actionLabel, v.h.id || ""
+	].join("\t")).join("\n");
+}
+
+function syncWakeButton(card, v) {
+	const actions = card.querySelector(".actions");
+	if (!actions) return;
+	let wake = actions.querySelector("[data-act='wake']");
+	if (v.wantWake && !wake) {
+		wake = document.createElement("button");
+		wake.type = "button";
+		wake.className = "ghost";
+		wake.dataset.act = "wake";
+		wake.innerHTML = `<span class="box-icon"></span>${t("host.wake")}`;
+		const host = v.h;
+		wake.onclick = async (ev) => {
+			ev.stopPropagation();
+			await ensureWasmRuntime();
+			ensureDiscovery();
+			if (api.wakeup) api.wakeup(host.addr, host.registKey, host.ps5 ? 1 : 0);
+			log(t("log.waking"));
+		};
+		actions.appendChild(wake);
+	} else if (!v.wantWake && wake) {
+		wake.remove();
+	}
+}
+
+function patchHostCards(list, views) {
+	const cards = [...list.querySelectorAll(".host-card")];
+	if (cards.length !== views.length) return false;
+	for (let i = 0; i < views.length; i++) {
+		if (cards[i].getAttribute("data-addr") !== views[i].h.addr) return false;
+	}
+	for (let i = 0; i < views.length; i++) {
+		const card = cards[i];
+		const v = views[i];
+		card.classList.toggle("selected", selectedAddr === v.h.addr);
+		const icon = card.querySelector(".icon");
+		if (icon) {
+			icon.classList.remove("ready", "standby", "unknown");
+			icon.classList.add(v.iconCls);
+		}
+		const stateEl = card.querySelector(".state");
+		if (stateEl) stateEl.textContent = v.stateText;
+		syncWakeButton(card, v);
+	}
+	return true;
+}
+
+function bindHostCard(card, h, v) {
+	const selectCard = () => {
+		selectedAddr = h.addr;
+		document.querySelectorAll(".host-card").forEach((c) => c.classList.toggle("selected", c === card));
+	};
+	const connect = () => {
+		selectCard();
+		if (connecting || streaming) return;
+		if (h.registered) startStream(h);
+		else openRegist(h);
+	};
+	card.onclick = (ev) => {
+		if (ev.target.closest("[data-act], .host-name-input")) return;
+		connect();
+	};
+	card.onkeydown = (ev) => {
+		if (ev.target.classList.contains("host-name-input")) return;
+		if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); connect(); }
+	};
+	card.querySelectorAll("[data-act=\"rename\"]").forEach((el) => {
+		el.onclick = (ev) => {
+			ev.stopPropagation();
+			selectCard();
+			beginHostRename(card, h);
+		};
+	});
+	const revealBtn = card.querySelector("[data-act=\"reveal\"]");
+	if (revealBtn) {
+		revealBtn.onclick = (ev) => {
+			ev.stopPropagation();
+			toggleRevealAddr(h.addr);
+			lastHostListSig = "";
+			renderHosts();
+		};
+	}
+	const actBtn = card.querySelector("[data-act=\"hide\"], [data-act=\"delete\"]");
+	if (actBtn) {
+		actBtn.onclick = async (ev) => {
+			ev.stopPropagation();
+			selectCard();
+			if (actBtn.dataset.act === "hide") {
+				const ok = await askConfirm(t("confirm.hideTitle"), t("confirm.hideText"));
+				if (!ok) return;
+				const set = hiddenSet();
+				set.add(h.addr);
+				if (normAddr(h.addr)) set.add(normAddr(h.addr));
+				persistHidden(set);
+				lastHostListSig = "";
+				renderHosts();
+				return;
+			}
+			const ok = await askConfirm(t("confirm.deleteTitle"), t("confirm.deleteText"));
+			if (!ok) return;
+			persistHosts(savedHosts().filter((x) => x.host !== h.addr && normAddr(x.host) !== normAddr(h.addr)));
+		};
+	}
+	syncWakeButton(card, v);
+}
+
 function renderHosts() {
 	const list = $("hosts");
 	if (!list) return;
-	if (list.querySelector(".host-name-input:focus")) return;
+	if (hostsPointerDown || list.querySelector(".host-name-input")) return;
+	const views = mergedHosts().map(hostView);
+	const sig = hostStructureSig(views);
+	if (sig === lastHostListSig && list.dataset.ready === "1" && patchHostCards(list, views))
+		return;
+	lastHostListSig = sig;
+	list.dataset.ready = "1";
 	list.innerHTML = "";
-	const revealed = revealedAddrSet();
-	for (const h of mergedHosts()) {
+	for (const v of views) {
+		const h = v.h;
 		const li = document.createElement("li");
-		const state = wakingAddrs.has(h.addr) ? "waking" : (h.state || "unknown");
-		const registered = h.registered ? t("host.registered") : t("host.unregistered");
-		const origin = h.discovered && h.manual ? t("host.discoveredManual")
-			: h.discovered ? t("host.discovered") : t("host.manual");
-		const idLine = t("host.id", { id: h.id || "—", status: registered });
-		const actionLabel = h.manual && !h.discovered ? t("host.delete") : (!h.registered ? t("host.hide") : "");
-		const act = h.manual && !h.discovered ? "delete" : "hide";
-		const stateKey = "state." + state;
-		const stateName = t(stateKey) === stateKey ? state : t(stateKey);
-		const stateText = t("host.state", { state: stateName }) + (h.appName ? "\n" + t("host.app", { app: h.appName }) : "");
-		const addrShown = revealed.has(h.addr);
-		const displayAddr = addrShown ? h.addr : maskHostAddr(h.addr);
-		const rawName = h.name || h.addr;
-		const displayName = (!h.name || h.name === h.addr) && !addrShown ? maskHostAddr(h.addr) : rawName;
 		li.innerHTML = `
 			<div class="host-card ${selectedAddr === h.addr ? "selected" : ""}" data-addr="${escapeHtml(h.addr)}" role="button" tabindex="0">
-				${iconHtml(!!h.ps5, state, h.addr)}
+				${iconHtml(!!h.ps5, v.state, h.addr)}
 				<div class="meta">
 					<div class="host-name-row">
-						<div class="host-name" data-act="rename">${escapeHtml(displayName)}</div>
+						<div class="host-name" data-act="rename">${escapeHtml(v.displayName)}</div>
 						<button type="button" class="host-chip host-chip-icon" data-act="rename" title="${escapeHtml(t("host.rename"))}" aria-label="${escapeHtml(t("host.rename"))}">
 							<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
 						</button>
 					</div>
 					<div class="host-addr-row">
-						<span>${escapeHtml(t("host.address", { addr: displayAddr }))}</span>
-						<button type="button" class="host-chip" data-act="reveal" aria-pressed="${addrShown ? "true" : "false"}">${escapeHtml(addrShown ? t("host.hideAddr") : t("host.showAddr"))}</button>
+						<span>${escapeHtml(t("host.address", { addr: v.displayAddr }))}</span>
+						<button type="button" class="host-chip" data-act="reveal" aria-pressed="${v.addrShown ? "true" : "false"}">${escapeHtml(v.addrShown ? t("host.hideAddr") : t("host.showAddr"))}</button>
 					</div>
-					<div>${escapeHtml(idLine)}</div>
-					<div>${escapeHtml(origin)}</div>
+					<div>${escapeHtml(v.idLine)}</div>
+					<div>${escapeHtml(v.origin)}</div>
 				</div>
-				<div class="state">${escapeHtml(stateText)}</div>
-				<div class="actions">${actionLabel ? `<button type="button" class="ghost" data-act="${act}"><span class="box-icon"></span>${actionLabel}</button>` : ""}</div>
+				<div class="state">${escapeHtml(v.stateText)}</div>
+				<div class="actions">${v.actionLabel ? `<button type="button" class="ghost" data-act="${v.act}"><span class="box-icon"></span>${v.actionLabel}</button>` : ""}</div>
 			</div>`;
-		const card = li.querySelector(".host-card");
-		const selectCard = () => {
-			selectedAddr = h.addr;
-			document.querySelectorAll(".host-card").forEach((c) => c.classList.toggle("selected", c === card));
-		};
-		const connect = () => {
-			selectCard();
-			if (connecting || streaming) return;
-			if (h.registered) startStream(h);
-			else openRegist(h);
-		};
-		card.onclick = (ev) => {
-			if (ev.target.closest("[data-act], .host-name-input")) return;
-			connect();
-		};
-		card.onkeydown = (ev) => {
-			if (ev.target.classList.contains("host-name-input")) return;
-			if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); connect(); }
-		};
-		card.querySelectorAll("[data-act=\"rename\"]").forEach((el) => {
-			el.onclick = (ev) => {
-				ev.stopPropagation();
-				selectCard();
-				beginHostRename(card, h);
-			};
-		});
-		const revealBtn = card.querySelector("[data-act=\"reveal\"]");
-		if (revealBtn) {
-			revealBtn.onclick = (ev) => {
-				ev.stopPropagation();
-				toggleRevealAddr(h.addr);
-				renderHosts();
-			};
-		}
-		const actBtn = card.querySelector("[data-act=\"hide\"], [data-act=\"delete\"]");
-		if (actBtn) {
-			actBtn.onclick = async (ev) => {
-				ev.stopPropagation();
-				selectCard();
-				if (actBtn.dataset.act === "hide") {
-					const ok = await askConfirm(t("confirm.hideTitle"), t("confirm.hideText"));
-					if (!ok) return;
-					const set = hiddenSet();
-					set.add(h.addr);
-					if (normAddr(h.addr)) set.add(normAddr(h.addr));
-					persistHidden(set);
-					renderHosts();
-					return;
-				}
-				const ok = await askConfirm(t("confirm.deleteTitle"), t("confirm.deleteText"));
-				if (!ok) return;
-				persistHosts(savedHosts().filter((x) => x.host !== h.addr && normAddr(x.host) !== normAddr(h.addr)));
-			};
-		}
-		if (h.registered && h.registKey && state !== "ready") {
-			const wake = document.createElement("button");
-			wake.type = "button";
-			wake.className = "ghost";
-			wake.innerHTML = `<span class="box-icon"></span>${t("host.wake")}`;
-			wake.onclick = async (ev) => {
-				ev.stopPropagation();
-				await ensureWasmRuntime();
-				ensureDiscovery();
-				if (api.wakeup) api.wakeup(h.addr, h.registKey, h.ps5 ? 1 : 0);
-				log(t("log.waking"));
-			};
-			li.querySelector(".actions").appendChild(wake);
-		}
+		bindHostCard(li.querySelector(".host-card"), h, v);
 		list.appendChild(li);
 	}
 }
@@ -5184,13 +5245,23 @@ function syncStreamChrome() {
 }
 
 let streamChromeTimer = 0;
+function hideStreamChrome() {
+	const stream = $("stream-view");
+	if (!stream) return;
+	const bar = stream.querySelector(".stream-bar");
+	const active = document.activeElement;
+	if (bar && active && bar.contains(active) && typeof active.blur === "function")
+		active.blur();
+	stream.classList.remove("show-chrome");
+}
 function onStreamChromeMove(ev) {
 	const stream = $("stream-view");
 	if (!stream || stream.classList.contains("hidden")) return;
-	const nearTop = ev.clientY <= 80 || !!(ev.target && ev.target.closest && ev.target.closest(".stream-bar"));
+	const overBar = !!(ev.target && ev.target.closest && ev.target.closest(".stream-bar"));
+	const nearTop = ev.clientY <= 80 || overBar;
 	clearTimeout(streamChromeTimer);
 	if (nearTop) stream.classList.add("show-chrome");
-	else streamChromeTimer = setTimeout(() => stream.classList.remove("show-chrome"), 500);
+	else streamChromeTimer = setTimeout(hideStreamChrome, 400);
 }
 
 async function enterStreamFullscreen() {
@@ -5893,6 +5964,17 @@ async function testAddHostPorts() {
 }
 
 function bindUi() {
+	const hostList = $("hosts");
+	if (hostList) {
+		hostList.addEventListener("pointerdown", () => { hostsPointerDown = true; });
+		const endHostPtr = () => {
+			if (!hostsPointerDown) return;
+			hostsPointerDown = false;
+			scheduleRenderHosts();
+		};
+		window.addEventListener("pointerup", endHostPtr);
+		window.addEventListener("pointercancel", endHostPtr);
+	}
 	$("btn-settings").onclick = () => {
 		saveSettings();
 		settingsReturnView = "welcome";
@@ -6333,6 +6415,10 @@ function bindUi() {
 	canvas.addEventListener("pointerleave", () => { touch.active = false; });
 	$("stream-view").addEventListener("mousemove", onStreamChromeMove);
 	$("stream-view").addEventListener("pointerdown", onStreamChromeMove);
+	$("stream-view").addEventListener("mouseleave", () => {
+		clearTimeout(streamChromeTimer);
+		streamChromeTimer = setTimeout(hideStreamChrome, 400);
+	});
 	canvas.addEventListener("click", () => {
 		if (!streaming || vpadOn) return;
 		cursorLocked = true;
