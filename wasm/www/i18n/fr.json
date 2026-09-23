@@ -425,6 +425,8 @@
 	"log.console": "Console : {name}",
 	"log.registFailed": "Échec de l’enregistrement : {error}",
 	"log.registIpv6": "IPv6 n’est pas supporté. Utilisez l’IPv4 publique de la box (ex. 82.x.x.x), pas l’adresse 2a01:…",
+	"log.registRunning": "Appairage en cours… recherche de la console.",
+	"log.registSearchFail": "La console n’a pas répondu à la recherche UDP 9295. Appairez en local avec l’adresse 192.168.x.x de la console - une IPv4 publique ne marche que si l’UDP 9295 est redirigé et joignable.",
 	"log.registLanHint": "L’appairage PIN se fait en local (192.168.x.x). Ensuite ajoutez la console avec l’IPv4 publique et les clés Regist / Morning.",
 	"log.registered": "Enregistrée - {name}",
 	"log.bitrateCapped": "Débit limité à {kbps} kbps pour un stream Web stable.",

@@ -1921,6 +1921,15 @@ html.electron-app #add-home-hint { display: none !important; }
 .portcheck-sum.ok { color: #69f0ae; }
 .portcheck-sum.warn { color: #ffd54f; }
 .portcheck-sum.bad { color: #ff8a80; }
+
+.reg-error {
+	margin: 0 0 8px;
+	font-weight: 600;
+	color: #ff8a80;
+	max-width: 640px;
+}
+.reg-error.pending { color: var(--hint); font-weight: 500; }
+.reg-error.hidden { display: none; }
 .portcheck ul {
 	margin: 0;
 	padding: 0;

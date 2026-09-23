@@ -956,10 +956,18 @@ function checkTcpPort(host, port, ms) {
 
 const portCheckAt = new Map();
 
-async function runPortCheck(host, user) {
+function serverOnSameLan(host) {
+	if (!isPrivateIpv4(host)) return false;
+	const net24 = (ip) => ip.split(".").slice(0, 3).join(".");
+	const target = net24(host);
+	return lanIPv4().some((ip) => isPrivateIpv4(ip) && net24(ip) === target);
+}
+
+async function runPortCheck(host, user, allowPrivate = false) {
 	if (user && homeAgents.online(user.id))
 		return homeAgents.portCheck(user.id, host, 9295, 3500);
-	if (isPrivateIpv4(host)) {
+	const privateTarget = isPrivateIpv4(host);
+	if (privateTarget && !allowPrivate && !serverOnSameLan(host)) {
 		const info = user ? homeAgents.info(user.id) : { homeProxyPending: false };
 		return {
 			error: info.homeProxyPending ? "home_proxy_pending" : "need_home_proxy",
@@ -968,7 +976,7 @@ async function runPortCheck(host, user) {
 		};
 	}
 	const status = await checkTcpPort(host, 9295, 2000);
-	return { ports: [{ port: 9295, proto: "tcp", role: "session", status }], via: "wan" };
+	return { ports: [{ port: 9295, proto: "tcp", role: "session", status }], via: privateTarget ? "lan" : "wan" };
 }
 
 function readBody(req, limit = 1024 * 1024) {
@@ -1223,7 +1231,7 @@ async function handleApi(req, res, reqUrl) {
 			return true;
 		}
 		portCheckAt.set(user.id, now);
-		const result = await runPortCheck(host, isElectronReq(req) ? null : user);
+		const result = await runPortCheck(host, isElectronReq(req) ? null : user, isElectronReq(req));
 		const tcp = (result.ports || []).find((p) => p.port === 9295 && p.proto === "tcp");
 		json(res, 200, {
 			...result,

@@ -425,6 +425,8 @@
 	"log.console": "Console: {name}",
 	"log.registFailed": "Registration failed: {error}",
 	"log.registIpv6": "IPv6 is not supported. Use the box public IPv4 (e.g. 82.x.x.x), not a 2a01:… address.",
+	"log.registRunning": "Pairing in progress… searching for the console.",
+	"log.registSearchFail": "The console did not answer the UDP 9295 search. Pair over the LAN using the console 192.168.x.x address - a public IPv4 only works if UDP 9295 is forwarded and reachable.",
 	"log.registLanHint": "PIN pairing must be done on the LAN (192.168.x.x). Then add the console with the public IPv4 and the Regist / Morning keys.",
 	"log.registered": "Registered - {name}",
 	"log.bitrateCapped": "Bitrate limited to {kbps} kbps for a stable Web stream.",

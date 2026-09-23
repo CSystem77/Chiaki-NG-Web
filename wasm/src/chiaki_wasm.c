@@ -54,6 +54,8 @@ typedef struct {
 } WasmState;
 
 static WasmState g_state;
+static int g_init_done;
+static int g_init_started;
 
 static int hex_nibble(char c)
 {
@@ -344,16 +346,27 @@ int chiaki_wasm_net_ready(void)
 EMSCRIPTEN_KEEPALIVE
 int chiaki_wasm_init(const char *proxy_url)
 {
+	if(g_init_done)
+		return 0;
+	if(g_init_started)
+	{
+		chiaki_wasm_session_stop();
+		chiaki_wasm_discover_stop();
+		chiaki_wasm_net_disconnect();
+	}
+	g_init_started = 1;
 	memset(&g_state, 0, sizeof(g_state));
 	pthread_mutex_init(&g_state.mu, NULL);
 	chiaki_log_init(&g_state.log, CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE, wasm_log_cb, NULL);
 
+	CHIAKI_LOGI(&g_state.log, "Init 1/3 : WebSocket du proxy");
 	if(chiaki_wasm_net_connect(proxy_url) != 0)
 	{
 		CHIAKI_LOGE(&g_state.log, "Impossible d'ouvrir le WebSocket du proxy POSIX (%s)", proxy_url ? proxy_url : "");
 		return -1;
 	}
 
+	CHIAKI_LOGI(&g_state.log, "Init 2/3 : chiaki_lib_init");
 	ChiakiErrorCode err = chiaki_lib_init();
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
@@ -361,9 +374,11 @@ int chiaki_wasm_init(const char *proxy_url)
 		return -1;
 	}
 
+	CHIAKI_LOGI(&g_state.log, "Init 3/3 : décodeur Opus");
 	chiaki_opus_decoder_init(&g_state.opus, &g_state.log);
 	g_state.opus_ready = 1;
 	CHIAKI_LOGI(&g_state.log, "Chiaki WASM %s prêt", CHIAKI_VERSION);
+	g_init_done = 1;
 	return 0;
 }
 
@@ -378,6 +393,8 @@ void chiaki_wasm_fini(void)
 		g_state.opus_ready = 0;
 	}
 	chiaki_wasm_net_disconnect();
+	g_init_done = 0;
+	g_init_started = 0;
 }
 
 EMSCRIPTEN_KEEPALIVE

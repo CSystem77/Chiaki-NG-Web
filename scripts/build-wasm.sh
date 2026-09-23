@@ -40,6 +40,19 @@ if [ -f "$NANOPB_PB2" ] && grep -q runtime_version "$NANOPB_PB2"; then
 	rm -f "$NANOPB_PB2"
 fi
 
+GF_CPU="$ROOT/third-party/gf-complete/src/gf_cpu.c"
+if [ -f "$GF_CPU" ] && grep -q "^int gf_cpu_identify(void)" "$GF_CPU"; then
+	echo "Correction de gf_cpu_identify (prototype void vs definition int) ..."
+	python3 - "$GF_CPU" <<'EOF'
+import io, re, sys
+p = sys.argv[1]
+s = io.open(p, "rb").read().decode("utf-8")
+pat = r"int gf_cpu_identify\(void\)(\r?\n\{\r?\n    gf_cpu_identified = 1;)\r?\n    return 0;(\r?\n\})"
+s = re.sub(pat, r"void gf_cpu_identify(void)\1\2", s)
+io.open(p, "wb").write(s.encode("utf-8"))
+EOF
+fi
+
 VENV="$ROOT/tools/wasm-python"
 if [ -x "$VENV/bin/python" ]; then
 	WASM_PYTHON="$VENV/bin/python"

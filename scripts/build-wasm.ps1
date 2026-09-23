@@ -101,6 +101,16 @@ Ensure-Vendor "third-party\nanopb" "https://github.com/nanopb/nanopb.git"
 Ensure-Vendor "third-party\jerasure" "https://github.com/streetpea/jerasure.git"
 Ensure-Vendor "third-party\gf-complete" "https://github.com/streetpea/gf-complete.git"
 
+$GfCpu = Join-Path $Root "third-party\gf-complete\src\gf_cpu.c"
+if (Test-Path $GfCpu) {
+	$gf = [System.IO.File]::ReadAllText($GfCpu)
+	$pat = "int gf_cpu_identify\(void\)(\r?\n\{\r?\n    gf_cpu_identified = 1;)\r?\n    return 0;(\r?\n\})"
+	if ($gf -match $pat) {
+		Write-Host "Correction de gf_cpu_identify (prototype void vs definition int) ..."
+		[System.IO.File]::WriteAllText($GfCpu, [regex]::Replace($gf, $pat, 'void gf_cpu_identify(void)$1$2'))
+	}
+}
+
 Write-Host "emcc: $((Get-Command emcc).Source)"
 Write-Host "protoc: $ProtocExe"
 Write-Host "python (nanopb): $WasmPython"

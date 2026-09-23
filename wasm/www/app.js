@@ -290,6 +290,7 @@ let retryingConnect = false;
 let sessionGate = null;
 let sessionStopping = false;
 let confirmDone = null;
+let registSearchFailed = false;
 
 const canvas = $("video");
 const ctx2d = canvas.getContext("2d");
@@ -4679,9 +4680,13 @@ function syncWakeButton(card, v) {
 		const host = v.h;
 		wake.onclick = async (ev) => {
 			ev.stopPropagation();
-			await ensureWasmRuntime();
+			const wasmOk = await ensureWasmRuntime();
+			if (!wasmOk || typeof api.wakeup !== "function") {
+				log(t("log.wasmFailed"), 0);
+				return;
+			}
 			ensureDiscovery();
-			if (api.wakeup) api.wakeup(host.addr, host.registKey, host.ps5 ? 1 : 0);
+			api.wakeup(host.addr, host.registKey, host.ps5 ? 1 : 0);
 			log(t("log.waking"));
 		};
 		actions.appendChild(wake);
@@ -5778,7 +5783,24 @@ function lookupPsnUsername(username) {
 	return "";
 }
 
+// The register flow used to report everything through log(), which the modal hides.
+// Mirror it into #reg-error so the failure is visible where the user is looking.
+function setRegError(msg, pending) {
+	const el = $("reg-error");
+	if (!el) return;
+	el.textContent = msg || "";
+	el.classList.toggle("pending", !!pending);
+	el.classList.toggle("hidden", !msg);
+}
+
+function regFail(key, vars) {
+	const msg = vars ? t(key, vars) : t(key);
+	log(msg, 0);
+	setRegError(msg);
+}
+
 function openRegist(host) {
+	setRegError("");
 	$("reg-host").value = host.addr || "";
 	$("reg-host").dataset.real = host.addr || "";
 	$("reg-pin").value = "";
@@ -5914,12 +5936,6 @@ async function testAddHostPorts() {
 	if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(host) || looksLikeIpv6(host)) {
 		out.classList.remove("hidden");
 		out.innerHTML = `<p class="portcheck-sum bad">${escapeHtml(t("add.portcheckBad"))}</p>`;
-		return;
-	}
-	if (isPrivateIpv4(host) && !cloud.homeProxy) {
-		out.classList.remove("hidden");
-		const key = cloud.homeProxyPending ? "add.portcheckNeedApprove" : "add.portcheckNeedHome";
-		out.innerHTML = `<p class="portcheck-sum bad">${escapeHtml(t(key))}</p>`;
 		return;
 	}
 	btn.disabled = true;
@@ -6287,29 +6303,39 @@ function bindUi() {
 		$("add-modal").classList.add("hidden");
 	};
 
-	$("reg-cancel").onclick = () => $("regist-modal").classList.add("hidden");
+	$("reg-cancel").onclick = () => { setRegError(""); $("regist-modal").classList.add("hidden"); };
 	$("reg-lookup").onclick = () => lookupPsnUsername($("reg-psn-user").value);
 	$("btn-psn-lookup").onclick = () => lookupPsnUsername($("s-psn-user").value);
 	$("reg-ok").onclick = async () => {
 		const pin = Number($("reg-pin").value);
-		if (!pin) return log(t("log.pinRequired"), 0);
+		if (!pin) return regFail("log.pinRequired");
 		const ps5 = Number($("regist-modal").dataset.ps5);
 		const host = ($("reg-host").dataset.real || $("reg-host").value).trim();
 		const psnId = normalizePsnAccountId($("reg-psn").value || psnIdForHost({ addr: host }));
 		if (ps5 && !psnIdLooksValid(psnId)) {
-			log(t("log.psnHint"), 0);
+			regFail("log.psnHint");
 			$("psn-regist-fields").classList.remove("hidden");
 			$("reg-psn").focus();
 			return;
 		}
 		if (looksLikeIpv6(host)) {
-			log(t("log.registIpv6"), 0);
+			regFail("log.registIpv6");
 			return;
 		}
 		if (psnId) upsertHostPsn(host, psnId, { name: $("regist-modal").dataset.name, ps5 });
 		if (host && !isPrivateIpv4(host)) log(t("log.registLanHint"), 0);
-		await ensureWasmRuntime();
-		api.regist?.(host, pin, psnId, ps5, 0);
+		setRegError(t("log.wasmLoading"), true);
+		const wasmOk = await ensureWasmRuntime();
+		if (!wasmOk || typeof api.regist !== "function") {
+			regFail("log.wasmFailed");
+			return;
+		}
+		registSearchFailed = false;
+		if (api.regist(host, pin, psnId, ps5, 0) !== 0) {
+			regFail("log.registFailed", { error: "start" });
+			return;
+		}
+		setRegError(t("log.registRunning"), true);
 	};
 
 	$("home-proxy-approve")?.addEventListener("click", () => approveHomeProxy());
@@ -6536,6 +6562,8 @@ function bindModule() {
 	};
 	Module.onLog = (level, msg) => {
 		if (shouldSuppressConnectLog(msg)) return;
+		if (/Regist (search failed|timed out waiting for search response)/i.test(String(msg || "")))
+			registSearchFailed = true;
 		log(msg, level);
 	};
 	Module.onHost = addDiscovered;
@@ -6592,7 +6620,16 @@ function bindModule() {
 		}
 	};
 	Module.onRegist = (info) => {
-		if (!info.ok) return log(t("log.registFailed", { error: info.error || "" }), 0);
+		if (!info.ok) {
+			log(t("log.registFailed", { error: info.error || "" }), 0);
+			if (registSearchFailed) {
+				log(t("log.registSearchFail"), 0);
+				setRegError(t("log.registSearchFail"));
+			} else {
+				setRegError(t("log.registFailed", { error: info.error || "" }));
+			}
+			return;
+		}
 		const host = ($("reg-host").dataset.real || $("reg-host").value).trim();
 		rememberHost({
 			host,
@@ -6602,6 +6639,7 @@ function bindModule() {
 			morning: info.morning,
 			psnId: normalizePsnAccountId($("reg-psn")?.value || "")
 		});
+		setRegError("");
 		$("regist-modal").classList.add("hidden");
 		log(t("log.registered", { name: info.nickname }));
 	};
@@ -6678,16 +6716,23 @@ async function startWasmRuntime() {
 	proxyState = "";
 	refreshProxyStatus();
 	log("Init Chiaki WASM → " + proxyUrl);
-	if (api.init(proxyUrl) !== 0) {
+	let initRc = -1;
+	try {
+		initRc = api.init(proxyUrl);
+	} catch (e) {
+		log("WASM init: " + (e && e.message ? e.message : e), 0);
+	}
+	if (initRc !== 0) {
 		proxyState = "failed";
 		refreshProxyStatus();
+		log(t("log.wasmFailed"), 0);
 		return false;
 	}
 	try {
 		await waitFor(() => api.netReady() === 1, 8000);
 		proxyState = "connected";
 		refreshProxyStatus();
-		if (cloud.homeProxy) startDiscovery();
+		if (cloud.homeProxy || isElectronApp()) startDiscovery();
 	} catch {
 		proxyState = "offline";
 		refreshProxyStatus();
@@ -6701,6 +6746,10 @@ function ensureWasmRuntime() {
 		wasmReadyP = startWasmRuntime().then((ok) => {
 			if (!ok) wasmReadyP = null;
 			return ok;
+		}, (err) => {
+			wasmReadyP = null;
+			log("WASM: " + (err && err.message ? err.message : err), 0);
+			return false;
 		});
 	}
 	return wasmReadyP;
@@ -6708,7 +6757,7 @@ function ensureWasmRuntime() {
 
 function scheduleWasmWarmup() {
 	const kick = () => {
-		if (cloud.homeProxyPending) return;
+		if (cloud.homeProxyPending && !isElectronApp()) return;
 		ensureWasmRuntime().catch(() => {});
 	};
 	const onFirstInput = () => {

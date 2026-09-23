@@ -456,6 +456,13 @@ int chiaki_wasm_net_connect(const char *proxy_url)
 	attr.protocols = "binary";
 	attr.createOnMainThread = EM_TRUE;
 
+	if(g_ws)
+	{
+		emscripten_websocket_close(g_ws, 1000, "reinit");
+		emscripten_websocket_delete(g_ws);
+		g_ws = 0;
+	}
+
 	pthread_mutex_lock(&g_mu);
 	g_ws_open = 0;
 	g_ws_failed = 0;
