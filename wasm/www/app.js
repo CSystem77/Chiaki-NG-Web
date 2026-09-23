@@ -4977,7 +4977,8 @@ function renameHost(addr, name) {
 		return;
 	}
 	const saved = savedHosts();
-	const existing = saved.find((h) => h.host === addr);
+	const ip = normAddr(addr);
+	const existing = saved.find((h) => h.host === addr || (ip && normAddr(h.host) === ip));
 	if (existing) {
 		if (existing.name === trimmed) {
 			renderHosts();
@@ -5014,7 +5015,10 @@ function beginHostRename(card, host) {
 	const finish = (save) => {
 		if (input.dataset.done) return;
 		input.dataset.done = "1";
-		if (save) renameHost(host.addr, input.value);
+		const value = input.value;
+		input.onblur = null;
+		input.replaceWith(nameEl);
+		if (save) renameHost(host.addr, value);
 		else renderHosts();
 	};
 	input.onkeydown = (ev) => {
