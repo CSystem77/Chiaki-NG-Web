@@ -51,3 +51,6 @@ wasm/electron/.stage
 wasm/build/
 /tools/protoc
 /tools/wasm-python
+/Rapport/
+wasm/proxy/certs/*.pem
+wasm/proxy/certs/*.key

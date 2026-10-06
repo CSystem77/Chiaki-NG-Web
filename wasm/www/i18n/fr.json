@@ -20,7 +20,7 @@
 	"auth.bad": "E-mail ou mot de passe incorrect.",
 	"auth.taken": "Cet identifiant est déjà utilisé.",
 	"auth.emailTaken": "Cet e-mail est déjà utilisé.",
-	"auth.weak": "Mot de passe trop court (6 caractères minimum).",
+	"auth.weak": "Mot de passe trop court (8 caractères minimum).",
 	"auth.invalid": "Identifiant invalide (3–32 caractères : lettres, chiffres, . _ -).",
 	"auth.invalidEmail": "E-mail invalide.",
 	"auth.registerOff": "La création de compte est désactivée.",

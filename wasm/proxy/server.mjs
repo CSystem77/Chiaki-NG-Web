@@ -395,6 +395,10 @@ class PosixBridge {
 		const ip = intToIp(h.c >>> 0);
 		rec.remotePort = port;
 		rec.remoteAddr = ip;
+		if (!isRelayAllowed(ip, port)) {
+			if (h.id) this.reply(h, -1, 13);
+			return;
+		}
 		if (rec.udp) {
 			if (h.id) this.reply(h, 0);
 			return;
@@ -420,7 +424,7 @@ class PosixBridge {
 		if (rec.udp) {
 			const port = h.b || rec.remotePort;
 			const ip = h.c ? intToIp(h.c >>> 0) : rec.remoteAddr;
-			rec.udp.send(payload, port, ip);
+			if (isRelayAllowed(ip, port)) rec.udp.send(payload, port, ip);
 		} else if (rec.tcp) {
 			rec.tcp.write(payload);
 		}
@@ -458,6 +462,10 @@ class PosixBridge {
 		const host = payload.toString("utf8").replace(/\0+$/, "");
 		try {
 			const r = await dns.lookup(host, { family: 4 });
+			if (!isRelayAllowed(r.address)) {
+				this.reply(h, -1, 0);
+				return;
+			}
 			const ip = ipToInt(r.address);
 			const buf = Buffer.alloc(4);
 			buf.writeUInt32LE(ip, 0);
@@ -500,16 +508,52 @@ function isInside(root, file) {
 	return resolved === base || resolved.startsWith(base + path.sep);
 }
 
+const DENY_EXT = new Set([".mjs", ".pem", ".key", ".sqlite", ".db", ".env"]);
+const DENY_NAME = new Set(["server.mjs", "env.mjs", "store.mjs", "share.mjs"]);
+
+function isSensitivePath(urlPath) {
+	const segments = urlPath.split(/[\\/]+/).filter(Boolean);
+	for (const raw of segments) {
+		if (raw.includes(":")) return true;
+		const lower = raw.toLowerCase();
+		const seg = lower.replace(/[.\s]+$/, "");
+		if (lower.startsWith(".") || seg.startsWith(".")) return true;
+		if (seg === "certs") return true;
+	}
+	const rawBase = path.basename(urlPath).toLowerCase();
+	const base = rawBase.replace(/[.\s]+$/, "");
+	if (DENY_NAME.has(rawBase) || DENY_NAME.has(base)) return true;
+	if (DENY_EXT.has(path.extname(rawBase)) || DENY_EXT.has(path.extname(base))) return true;
+	return false;
+}
+
 function resolvePublicFile(urlPath) {
+	if (isSensitivePath(urlPath)) return null;
 	const name = path.basename(urlPath);
 	const wasmBin = name.startsWith("chiaki") && (name.endsWith(".wasm") || name.endsWith(".js"));
 	const wwwFile = path.normalize(path.join(WWW, urlPath));
 	const rootFile = path.normalize(path.join(ROOT, urlPath));
 	if (!wasmBin && isInside(WWW, wwwFile) && fs.existsSync(wwwFile) && fs.statSync(wwwFile).isFile())
 		return wwwFile;
-	if (isInside(ROOT, rootFile)) return rootFile;
+	if (wasmBin && isInside(ROOT, rootFile)) return rootFile;
 	return null;
 }
+
+const CSP_POLICY = [
+	"default-src 'self'",
+	"script-src 'self' 'wasm-unsafe-eval' blob:",
+	"worker-src 'self' blob:",
+	"child-src 'self' blob:",
+	"style-src 'self' 'unsafe-inline'",
+	"img-src 'self' data: blob:",
+	"media-src 'self' blob:",
+	"font-src 'self' data:",
+	"connect-src 'self' ws: wss:",
+	"frame-src 'self'",
+	"object-src 'none'",
+	"base-uri 'self'",
+	"form-action 'self'"
+].join("; ");
 
 function sendFile(req, res, file) {
 	const corp = {
@@ -533,6 +577,8 @@ function sendFile(req, res, file) {
 		headers["Cache-Control"] = [".html", ".js", ".mjs", ".css", ".json"].includes(ext)
 			? "no-store"
 			: "public, max-age=60, must-revalidate";
+		if (ext === ".html")
+			headers["Content-Security-Policy"] = CSP_POLICY;
 		if (req.headers["if-none-match"] === etag) {
 			res.writeHead(304, headers);
 			res.end();
@@ -899,22 +945,55 @@ function isPrivateIpv4(ip) {
 	return false;
 }
 
+const RELAY_PORTS = new Set([987, 9295, 9296, 9297, 9302]);
+
+function isRelayAllowed(ip, port) {
+	const s = String(ip || "").trim();
+	if (s === "255.255.255.255") return true;
+	if (isPrivateIpv4(s)) return true;
+	const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+	if (!m) return false;
+	const a = Number(m[1]);
+	const b = Number(m[2]);
+	if (a >= 224 && a <= 239) return true;
+	if (a === 0 || a === 127) return false;
+	if (a === 169 && b === 254) return false;
+	if (cfg.relayAllowWan !== true) return false;
+	if (port == null) return true;
+	return RELAY_PORTS.has(Number(port));
+}
+
+function cleanIp(raw) {
+	return String(raw || "").replace(/^\[|\]$/g, "").replace(/^::ffff:/i, "").trim();
+}
+
+function peerTrusted(req) {
+	if (cfg.trustProxy === "on") return true;
+	if (cfg.trustProxy === "off") return false;
+	const peer = cleanIp(req.socket?.remoteAddress);
+	if (peer === "::1") return true;
+	return /^127\./.test(peer) || isPrivateIpv4(peer);
+}
+
 function clientIpv4(req) {
-	const hdrs = [
-		req.headers["cf-connecting-ip"],
-		req.headers["x-real-ip"],
-		String(req.headers["x-forwarded-for"] || "").split(",")[0]
-	];
 	let raw = "";
-	for (const h of hdrs) {
-		const v = String(h || "").trim();
-		if (v) {
-			raw = v;
-			break;
+	if (peerTrusted(req)) {
+		const xff = String(req.headers["x-forwarded-for"] || "").split(",").map((s) => s.trim()).filter(Boolean);
+		const hdrs = [
+			req.headers["cf-connecting-ip"],
+			req.headers["x-real-ip"],
+			xff.length ? xff[xff.length - 1] : ""
+		];
+		for (const h of hdrs) {
+			const v = String(h || "").trim();
+			if (v) {
+				raw = v;
+				break;
+			}
 		}
 	}
 	if (!raw) raw = String(req.socket?.remoteAddress || "");
-	const ip = raw.replace(/^\[|\]$/g, "").replace(/^::ffff:/i, "").trim();
+	const ip = cleanIp(raw);
 	return isCheckableIpv4(ip) ? ip : "";
 }
 
@@ -955,19 +1034,47 @@ function checkTcpPort(host, port, ms) {
 }
 
 const portCheckAt = new Map();
+const psnLookupAt = new Map();
+const authAttempts = new Map();
 
-function serverOnSameLan(host) {
-	if (!isPrivateIpv4(host)) return false;
-	const net24 = (ip) => ip.split(".").slice(0, 3).join(".");
-	const target = net24(host);
-	return lanIPv4().some((ip) => isPrivateIpv4(ip) && net24(ip) === target);
+function pruneMap(map, maxAgeMs) {
+	const cutoff = Date.now() - maxAgeMs;
+	for (const [key, val] of map) {
+		const ts = typeof val === "number" ? val : (val && val.start) || 0;
+		if (ts < cutoff) map.delete(key);
+	}
+}
+
+function authRateLimited(req) {
+	const ip = clientIpv4(req) || cleanIp(req.socket?.remoteAddress) || "unknown";
+	const now = Date.now();
+	const windowMs = 60000;
+	const max = 30;
+	pruneMap(authAttempts, windowMs);
+	const rec = authAttempts.get(ip);
+	if (!rec) {
+		authAttempts.set(ip, { start: now, count: 1 });
+		return false;
+	}
+	rec.count++;
+	return rec.count > max;
+}
+
+function userOwnsHost(user, host) {
+	if (!user) return false;
+	try {
+		const hosts = store.readProfile(user.id).hosts || [];
+		return hosts.some((h) => String(h && (h.addr || h.host) || "").trim() === host);
+	} catch {
+		return false;
+	}
 }
 
 async function runPortCheck(host, user, allowPrivate = false) {
 	if (user && homeAgents.online(user.id))
 		return homeAgents.portCheck(user.id, host, 9295, 3500);
 	const privateTarget = isPrivateIpv4(host);
-	if (privateTarget && !allowPrivate && !serverOnSameLan(host)) {
+	if (privateTarget && !allowPrivate) {
 		const info = user ? homeAgents.info(user.id) : { homeProxyPending: false };
 		return {
 			error: info.homeProxyPending ? "home_proxy_pending" : "need_home_proxy",
@@ -1066,6 +1173,10 @@ async function handleApi(req, res, reqUrl) {
 			json(res, 400, { error: "auth_disabled" });
 			return true;
 		}
+		if (authRateLimited(req)) {
+			json(res, 429, { error: "rate_limited" });
+			return true;
+		}
 		let body;
 		try { body = await readBody(req, 16 * 1024); }
 		catch { json(res, 400, { error: "bad_request" }); return true; }
@@ -1082,6 +1193,10 @@ async function handleApi(req, res, reqUrl) {
 	if (route === "POST /api/register") {
 		if (!cfg.authEnabled || !cfg.allowRegister) {
 			json(res, 403, { error: "register_disabled" });
+			return true;
+		}
+		if (authRateLimited(req)) {
+			json(res, 429, { error: "rate_limited" });
 			return true;
 		}
 		let body;
@@ -1217,6 +1332,7 @@ async function handleApi(req, res, reqUrl) {
 		const user = requireUser(req, res);
 		if (!user) return true;
 		const now = Date.now();
+		pruneMap(portCheckAt, 600000);
 		const prev = portCheckAt.get(user.id) || 0;
 		if (now - prev < 2500) {
 			json(res, 429, { error: "rate_limited" });
@@ -1231,7 +1347,8 @@ async function handleApi(req, res, reqUrl) {
 			return true;
 		}
 		portCheckAt.set(user.id, now);
-		const result = await runPortCheck(host, isElectronReq(req) ? null : user, isElectronReq(req));
+		const electron = isElectronReq(req);
+		const result = await runPortCheck(host, electron ? null : user, electron || userOwnsHost(user, host));
 		const tcp = (result.ports || []).find((p) => p.port === 9295 && p.proto === "tcp");
 		json(res, 200, {
 			...result,
@@ -1270,6 +1387,21 @@ function handleRequest(req, res) {
 	handleApi(req, res, reqUrl).then((done) => {
 		if (done) return;
 		if (reqUrl.pathname === "/psn-account-id") {
+			const user = currentUser(req);
+			if (cfg.authEnabled && !user) {
+				res.writeHead(401, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "auth_required" }));
+				return;
+			}
+			const psnKey = user ? "u:" + user.id : "ip:" + (clientIpv4(req) || "anon");
+			const nowTs = Date.now();
+			pruneMap(psnLookupAt, 600000);
+			if (nowTs - (psnLookupAt.get(psnKey) || 0) < 3000) {
+				res.writeHead(429, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "rate_limited" }));
+				return;
+			}
+			psnLookupAt.set(psnKey, nowTs);
 			const username = (reqUrl.searchParams.get("username") || "").trim();
 			if (!username) {
 				res.writeHead(400, { "Content-Type": "application/json" });
@@ -1335,8 +1467,32 @@ function completeWsUpgrade(req, socket) {
 	return true;
 }
 
+function sameOrigin(req) {
+	const origin = req.headers["origin"];
+	if (!origin) return true;
+	let originHost;
+	try {
+		originHost = new URL(origin).host;
+	} catch {
+		return false;
+	}
+	const allowed = new Set();
+	if (req.headers["host"]) allowed.add(String(req.headers["host"]));
+	const fwd = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+	if (fwd) allowed.add(fwd);
+	if (cfg.publicOrigin) {
+		try { allowed.add(new URL(cfg.publicOrigin).host); } catch {}
+		allowed.add(cfg.publicOrigin);
+	}
+	return allowed.has(originHost);
+}
+
 function attachUpgrade(server) {
 	server.on("upgrade", (req, socket) => {
+		if (!sameOrigin(req)) {
+			socket.destroy();
+			return;
+		}
 		const pathName = String(req.url || "").split("?")[0];
 		if (pathName.startsWith("/share-sig")) {
 			shareHub.attach(req, socket);

@@ -70,6 +70,14 @@ export function loadEnv() {
 		dbPath: path.join(dbDir, dbName),
 		maxHosts: Math.max(1, Number(process.env.CHIAKI_MAX_HOSTS || 32)),
 		discoveryEnabled: bool(process.env.CHIAKI_DISCOVERY_ENABLED, true),
-		shareKeywordPause: bool(process.env.CHIAKI_SHARE_KEYWORD_PAUSE, false)
+		shareKeywordPause: bool(process.env.CHIAKI_SHARE_KEYWORD_PAUSE, false),
+		relayAllowWan: bool(process.env.CHIAKI_RELAY_ALLOW_WAN, true),
+		publicOrigin: (process.env.CHIAKI_PUBLIC_ORIGIN || "").trim(),
+		trustProxy: (() => {
+			const v = String(process.env.CHIAKI_TRUST_PROXY || "").trim().toLowerCase();
+			if (/^(1|true|yes|on)$/.test(v)) return "on";
+			if (/^(0|false|no|off)$/.test(v)) return "off";
+			return "auto";
+		})()
 	};
 }

@@ -20,7 +20,7 @@
 	"auth.bad": "Invalid email or password.",
 	"auth.taken": "That username is already taken.",
 	"auth.emailTaken": "That email is already used.",
-	"auth.weak": "Password too short (6 characters minimum).",
+	"auth.weak": "Password too short (8 characters minimum).",
 	"auth.invalid": "Invalid username (3–32 characters: letters, numbers, . _ -).",
 	"auth.invalidEmail": "Invalid email.",
 	"auth.registerOff": "Account creation is disabled.",

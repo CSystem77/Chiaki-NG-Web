@@ -22,6 +22,8 @@ function encodeWsText(text) {
 	return Buffer.concat([header, payload]);
 }
 
+const GUEST_TO_HOST = new Set(["offer", "answer", "ice", "pad", "pli", "bye"]);
+
 export function createShareHub({ store, decodeWsFrame, wsAccept, readCookie }) {
 	const rooms = new Map();
 
@@ -84,7 +86,8 @@ export function createShareHub({ store, decodeWsFrame, wsAccept, readCookie }) {
 			}
 			return;
 		}
-		if (room.host) send(room.host, { ...msg, from: meta.id });
+		if (!GUEST_TO_HOST.has(msg.type)) return;
+		if (room.host) send(room.host, { ...msg, rights: undefined, from: meta.id });
 	}
 
 	function attach(req, socket) {

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -256,11 +257,9 @@ static bool run_agent_loop(CloudWs &ws)
 			AgentHdr ah = read_agent_hdr(payload.data());
 			const uint8_t *pay = payload.data() + AGENT_HDR;
 			if (AGENT_HDR + ah.len > payload.size()) {
-				/* ignore truncated */
 			} else if (ah.type == A_PING) {
 				send_agent(ws, A_PONG, ah.sid, 0, nullptr, 0);
 			} else if (ah.type == A_PONG) {
-				/* ok */
 			} else if (ah.type == A_HELLO_OK) {
 				hello_ok = true;
 				if (ah.extra)
@@ -514,6 +513,20 @@ static bool prompt_account(std::string &email, std::string &pass)
 	return false;
 }
 
+static bool host_is_local(const std::string &h)
+{
+	if (h == "localhost" || h == "::1") return true;
+	if (h.rfind("127.", 0) == 0) return true;
+	if (h.rfind("10.", 0) == 0) return true;
+	if (h.rfind("192.168.", 0) == 0) return true;
+	if (h.rfind("169.254.", 0) == 0) return true;
+	if (h.rfind("172.", 0) == 0) {
+		int b = std::atoi(h.c_str() + 4);
+		if (b >= 16 && b <= 31) return true;
+	}
+	return false;
+}
+
 int main()
 {
 	if (!net_init()) {
@@ -535,6 +548,10 @@ int main()
 	load_dotenv();
 	std::string url_s = env_str("CHIAKI_CLOUD_URL", "https://chiaki.csphere.fr");
 	bool insecure = env_flag("CHIAKI_CLOUD_INSECURE", false);
+	if (insecure && !host_is_local(parse_cloud_url(url_s).host)) {
+		logf("CHIAKI_CLOUD_INSECURE ignored: TLS verification stays on for non-local host.\n");
+		insecure = false;
+	}
 	std::string ca = env_str("CHIAKI_CLOUD_CA", "");
 	std::string email, pass;
 	if (!prompt_account(email, pass)) {

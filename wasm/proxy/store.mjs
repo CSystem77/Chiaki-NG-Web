@@ -387,7 +387,7 @@ export function openStore(cfg) {
 				return { error: "invalid_username" };
 			if (!validEmail(addr))
 				return { error: "invalid_email" };
-			if (String(password || "").length < 6)
+			if (String(password || "").length < 8)
 				return { error: "weak_password" };
 			if (qUserByName.get(name))
 				return { error: "taken" };
@@ -412,7 +412,7 @@ export function openStore(cfg) {
 			if (!verifyPassword(currentPassword, row.password_hash))
 				return { error: "invalid_credentials" };
 			const passChanged = newPassword.length > 0;
-			if (passChanged && newPassword.length < 6)
+			if (passChanged && newPassword.length < 8)
 				return { error: "weak_password" };
 			if (username !== row.username) {
 				const other = qUserByName.get(username);

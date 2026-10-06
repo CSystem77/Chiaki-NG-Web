@@ -1150,8 +1150,10 @@ function shareKeywordHitIn(hay) {
 	return "";
 }
 
+const SHARE_OCR_ENABLED = false;
+
 function shareKeywordPauseAllowed() {
-	return cloud.shareKeywordPause === true;
+	return SHARE_OCR_ENABLED && cloud.shareKeywordPause === true;
 }
 
 function syncShareKeywordUi() {
@@ -1477,6 +1479,7 @@ function drawSharePausedCanvas() {
 }
 
 function loadShareOcrScript() {
+	if (!SHARE_OCR_ENABLED) return Promise.reject(new Error("ocr_disabled"));
 	if (window.Tesseract) return Promise.resolve();
 	if (share.ocrScriptP) return share.ocrScriptP;
 	share.ocrScriptP = new Promise((resolve, reject) => {
@@ -2404,7 +2407,7 @@ function shareConnectHost() {
 	ws.onmessage = async (ev) => {
 		let msg;
 		try { msg = JSON.parse(ev.data); } catch { return; }
-		if (msg.type === "hello") {
+		if (msg.type === "hello" && !msg.from) {
 			share.viewers = msg.viewers || 0;
 			if (msg.rights) applyShareData({ ...msg.rights, token: share.token, active: true });
 			updateShareBanners();
