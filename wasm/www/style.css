@@ -924,6 +924,16 @@ html.electron-app .fab-help {
 .proxy-dl-row a.proxy-dl-win:hover {
 	background: #5c9cff;
 }
+.profile-bar {
+	margin: 0 0 24px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+}
+.profile-bar .form-row { margin: 0; }
+.profile-actions, .profile-edit { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.profile-bar .hint { margin: 0; text-align: center; }
 .keys-toolbar {
 	display: flex;
 	flex-wrap: wrap;
